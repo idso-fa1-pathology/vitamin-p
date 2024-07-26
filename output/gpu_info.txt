@@ -1,0 +1,17 @@
+Hello from GPU job!
+Current time: 2024-07-26 21:33:21.037217
+Data directory: /rsrch5/home/plm/yshokrollahi/vitamin-p/data
+Output directory: /rsrch5/home/plm/yshokrollahi/vitamin-p/output
+
+GPU Information:
+CUDA is available: True
+Number of GPUs: 8
+
+GPU 0: NVIDIA H100 80GB HBM3
+GPU 1: NVIDIA H100 80GB HBM3
+GPU 2: NVIDIA H100 80GB HBM3
+GPU 3: NVIDIA H100 80GB HBM3
+GPU 4: NVIDIA H100 80GB HBM3
+GPU 5: NVIDIA H100 80GB HBM3
+GPU 6: NVIDIA H100 80GB HBM3
+GPU 7: NVIDIA H100 80GB HBM3

@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yshokrollahi-gpu-job
+  namespace: yn-gpu-workload
+  labels:
+    k8s-user: yshokrollahi
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      nodeSelector:
+        "nvidia.com/gpu.present": "true"
+      securityContext:
+        runAsUser: 297724
+        runAsGroup: 900027
+        fsGroup: 900027
+      containers:
+      - name: main
+        image: hpcharbor.mdanderson.edu/yshokrollahi/dlenv@sha256:6ca04bcff2b27c4ef050c1c693a9cc7015bd0909e9a4f977ce57e620b709c9a7
+        command: ["python", "/rsrch5/home/plm/yshokrollahi/vitamin-p/hello.py"]
+        args: ["-d", "/rsrch5/home/plm/yshokrollahi/vitamin-p/data", "-o", "/rsrch5/home/plm/yshokrollahi/vitamin-p/output"]
+        workingDir: "/rsrch5/home/plm/yshokrollahi/"
+        env:
+        - name: HOME
+          value: "/rsrch5/home/plm/yshokrollahi/"
+        - name: CODE_DIR
+          value: "/rsrch5/home/plm/yshokrollahi/vitamin-p"
+        - name: DATA_DIR
+          value: "/rsrch5/home/plm/yshokrollahi/vitamin-p/data"
+        volumeMounts:
+        - name: shm
+          mountPath: "/dev/shm"
+        - name: home
+          mountPath: "/rsrch5/home/plm/yshokrollahi/"
+        resources:
+          limits:
+            nvidia.com/gpu: "8"
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Never
+      volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: '21474836480'
+      - name: home
+        persistentVolumeClaim:
+          claimName: yshokrollahi-gpu-home

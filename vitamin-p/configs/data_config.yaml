@@ -1,0 +1,6 @@
+he_data_dir: 'data/raw/H&E'
+mif_data_dir: 'data/raw/mIF'
+processed_data_dir: 'data/processed'
+train_split: 0.7
+val_split: 0.15
+test_split: 0.15

@@ -1,4 +1,4 @@
 # configs/training_config.yaml
-epochs: 50
-early_stopping_patience: 5
+epochs: 200
+early_stopping_patience: 50
 model_checkpoint_path: 'models/checkpoints/model.h5'

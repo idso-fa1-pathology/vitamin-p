@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import os
+from sklearn.utils.class_weight import compute_class_weight
 
 def load_pannuke_fold(fold_path):
     fold_number = os.path.basename(fold_path).split()[-1]  # Extract the fold number
@@ -39,7 +40,7 @@ def create_hv_maps(masks):
                 hv_maps[i, ..., 1] += (y_coords - center_y) * mask
     
     # Normalize HV maps to [-1, 1]
-    hv_maps /= np.maximum(h, w)
+    hv_maps = np.clip(hv_maps / np.maximum(h, w), -1, 1)
     return hv_maps
 
 def load_fold(fold_path):
@@ -66,18 +67,19 @@ def load_fold(fold_path):
     num_classes = len(unique_types)
     types_one_hot = tf.keras.utils.to_categorical(types_indices, num_classes=num_classes)
     
-    return images, binary_masks, hv_maps, masks, types_one_hot, unique_types
+    return images, binary_masks, hv_maps, masks, types_one_hot, unique_types, types_indices
 
-def preprocess_pannuke_data(data_dir, fold, batch_size):
-    all_images, all_binary_masks, all_hv_maps, all_masks, all_types, unique_types = [], [], [], [], [], None
+def preprocess_pannuke_data(data_dir, fold, batch_size, augment_fn=None):
+    all_images, all_binary_masks, all_hv_maps, all_masks, all_types, unique_types, all_type_indices = [], [], [], [], [], None, []
     for fold_name in ['Fold 1', 'Fold 2', 'Fold 3']:
         fold_path = os.path.join(data_dir, fold_name)
-        images, binary_masks, hv_maps, masks, types, fold_unique_types = load_fold(fold_path)
+        images, binary_masks, hv_maps, masks, types, fold_unique_types, type_indices = load_fold(fold_path)
         all_images.append(images)
         all_binary_masks.append(binary_masks)
         all_hv_maps.append(hv_maps)
         all_masks.append(masks)
         all_types.append(types)
+        all_type_indices.extend(type_indices)
         if unique_types is None:
             unique_types = fold_unique_types
 
@@ -92,6 +94,20 @@ def preprocess_pannuke_data(data_dir, fold, batch_size):
     print(f"All HV maps shape: {all_hv_maps.shape}")
     print(f"All masks shape: {all_masks.shape}")
     print(f"All types shape: {all_types.shape}")
+
+    # Compute class weights for each branch
+    class_weights = {
+        'np_branch': compute_class_weight('balanced', classes=np.unique(all_binary_masks), y=all_binary_masks.flatten()),
+        'nt_branch': compute_class_weight('balanced', classes=np.arange(all_masks.shape[-1]), y=np.argmax(all_masks, axis=-1).flatten()),
+        'tc_branch': compute_class_weight('balanced', classes=np.arange(all_types.shape[-1]), y=np.argmax(all_types, axis=-1))
+    }
+    
+    # Convert class weights to dictionaries
+    class_weight_dicts = {
+        'np_branch': dict(enumerate(class_weights['np_branch'])),
+        'nt_branch': dict(enumerate(class_weights['nt_branch'])),
+        'tc_branch': dict(enumerate(class_weights['tc_branch']))
+    }
 
     # Split data
     total_samples = len(all_images)
@@ -118,7 +134,14 @@ def preprocess_pannuke_data(data_dir, fold, batch_size):
 
     # Create TensorFlow datasets
     def create_dataset(images, binary_masks, hv_maps, masks, types):
-        return tf.data.Dataset.from_tensor_slices((
+        def prepare_data(image, labels):
+            if augment_fn is not None and tf.random.uniform(()) > 0.5:  # Apply augmentation 50% of the time
+                image, labels['np_branch'], labels['hv_branch'], labels['nt_branch'], _ = augment_fn(
+                    image, labels['np_branch'], labels['hv_branch'], labels['nt_branch'], labels['tc_branch']
+                )
+            return image, labels
+
+        dataset = tf.data.Dataset.from_tensor_slices((
             images,
             {
                 'np_branch': binary_masks[..., np.newaxis],  # Add channel dimension
@@ -126,7 +149,12 @@ def preprocess_pannuke_data(data_dir, fold, batch_size):
                 'nt_branch': masks,
                 'tc_branch': types
             }
-        )).shuffle(buffer_size=1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        ))
+        
+        if augment_fn is not None:
+            dataset = dataset.map(prepare_data, num_parallel_calls=tf.data.AUTOTUNE)
+
+        return dataset.shuffle(buffer_size=1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     train_dataset = create_dataset(*train)
     val_dataset = create_dataset(*val)
@@ -145,23 +173,6 @@ def preprocess_pannuke_data(data_dir, fold, batch_size):
         print(f"NT branch min/max: {tf.reduce_min(labels['nt_branch'])}/{tf.reduce_max(labels['nt_branch'])}")
         print(f"TC branch min/max: {tf.reduce_min(labels['tc_branch'])}/{tf.reduce_max(labels['tc_branch'])}")
 
-    return train_dataset, val_dataset, test_dataset, unique_types
+    return train_dataset, val_dataset, test_dataset, unique_types, class_weight_dicts
 
 print("Updated preprocess_pannuke_data function")
-
-def load_and_preprocess_pannuke(data_dir):
-    folds = ['Fold 1', 'Fold 2', 'Fold 3']
-    all_images, all_masks, all_types = [], [], []
-
-    for fold in folds:
-        fold_path = os.path.join(data_dir, fold)
-        images, masks, types = load_pannuke_fold(fold_path)
-        all_images.append(images)
-        all_masks.append(masks)
-        all_types.append(types)
-
-    all_images = np.concatenate(all_images)
-    all_masks = np.concatenate(all_masks)
-    all_types = np.concatenate(all_types)
-
-    return all_images, all_masks, all_types

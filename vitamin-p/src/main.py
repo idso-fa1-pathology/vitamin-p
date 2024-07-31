@@ -1,7 +1,9 @@
+# src/main.py
+
 import tensorflow as tf
 import numpy as np
-from data.preprocessing import load_and_preprocess_he_data, load_and_preprocess_mif_data, split_data
-from training.trainer import VitaminPTrainer
+from data.preprocessing import preprocess_pannuke_data
+from models.expert_he import create_he_expert
 from utils.metrics import calculate_metrics
 import yaml
 
@@ -15,46 +17,83 @@ def main():
     model_config = load_config('configs/model_config.yaml')
     training_config = load_config('configs/training_config.yaml')
 
-    # Load and preprocess data
-    he_images, he_masks = load_and_preprocess_he_data(data_config['he_data_dir'])
-    mif_images, mif_masks = load_and_preprocess_mif_data(data_config['mif_data_dir'])
-
-    he_data = split_data(he_images, he_masks)
-    mif_data = split_data(mif_images, mif_masks)
-
-    # Combine H&E and mIF data for gating network training
-    mixed_train_images = np.concatenate([he_data[0][0], mif_data[0][0]])
-    mixed_train_labels = np.concatenate([np.zeros(len(he_data[0][0])), np.ones(len(mif_data[0][0]))])
-
-    # Create and train the model
-    trainer = VitaminPTrainer(model_config)
-    
-    print("Training expert models...")
-    trainer.train_experts(
-        (he_data[0], he_data[1]),  # Train and validation data for H&E
-        (mif_data[0], mif_data[1])  # Train and validation data for mIF
+    # Preprocess data
+    train_dataset, val_dataset, test_dataset, types = preprocess_pannuke_data(
+        data_config['he_data_dir'],
+        data_config['fold'],
+        model_config['batch_size']
     )
-    
-    print("Training gating network...")
-    trainer.train_gating_network((mixed_train_images, mixed_train_labels))
-    
-    print("Fine-tuning end-to-end...")
-    trainer.train_end_to_end((mixed_train_images, mixed_train_labels), epochs=training_config['fine_tune_epochs'])
 
-    # Evaluate the model
-    print("Evaluating the model...")
-    mixed_test_images = np.concatenate([he_data[2][0], mif_data[2][0]])
-    mixed_test_labels = np.concatenate([he_data[2][1], mif_data[2][1]])
+    # Print dataset information
+    print("Dataset Information:")
+    for name, dataset in [("Train", train_dataset), ("Validation", val_dataset), ("Test", test_dataset)]:
+        print(f"{name} dataset:")
+        for images, masks in dataset.take(1):
+            print(f"  Image shape: {images.shape}")
+            print(f"  Image dtype: {images.dtype}")
+            print(f"  Image min and max: {tf.reduce_min(images)}, {tf.reduce_max(images)}")
+            print(f"  Mask shape: {masks.shape}")
+            print(f"  Mask dtype: {masks.dtype}")
+            print(f"  Mask min and max: {tf.reduce_min(masks)}, {tf.reduce_max(masks)}")
+
+    # Create model
+    model = create_he_expert(model_config['input_shape'], model_config['num_classes'])
     
-    predictions = trainer.predict(mixed_test_images)
-    metrics = calculate_metrics(mixed_test_labels, predictions)
+    # Print model summary
+    model.summary()
+
+    # Compile model
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(model_config['learning_rate']),
+        loss=tf.keras.losses.BinaryFocalCrossentropy(from_logits=False),
+        metrics=[tf.keras.metrics.BinaryIoU(target_class_ids=[1], threshold=0.5)]
+    )
+
+    # Train model
+    history = model.fit(
+        train_dataset,
+        epochs=training_config['epochs'],
+        validation_data=val_dataset,
+        callbacks=[
+            tf.keras.callbacks.EarlyStopping(patience=training_config['early_stopping_patience']),
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=training_config['model_checkpoint_path'],
+                save_best_only=True
+            )
+        ]
+    )
+
+    # Evaluate model
+    test_loss, test_iou = model.evaluate(test_dataset)
+    print(f"Test Loss: {test_loss:.4f}")
+    print(f"Test IoU: {test_iou:.4f}")
+
+    # Calculate additional metrics
+    y_pred = model.predict(test_dataset)
+    y_true = np.concatenate([masks.numpy() for images, masks in test_dataset], axis=0)
     
-    print("Test Metrics:")
+    # Ensure y_true and y_pred have the same shape
+    y_pred = y_pred.reshape(y_true.shape)
+    
+    metrics = calculate_metrics(y_true, y_pred)
+    
+    print("Additional Test Metrics:")
     for metric_name, metric_value in metrics.items():
         print(f"{metric_name}: {metric_value:.4f}")
 
-    # Save the trained models
-    trainer.save_models('models/trained')
+    def check_batches(dataset, num_batches=5):
+        for i, (images, masks) in enumerate(dataset.take(num_batches)):
+            print(f"Batch {i+1}:")
+            print(f"  Image shape: {images.shape}")
+            print(f"  Image min and max: {tf.reduce_min(images)}, {tf.reduce_max(images)}")
+            print(f"  Mask shape: {masks.shape}")
+            print(f"  Mask min and max: {tf.reduce_min(masks)}, {tf.reduce_max(masks)}")
+
+    # In your main function
+    check_batches(train_dataset)
+    check_batches(val_dataset)
+    check_batches(test_dataset)
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,8 @@
+# src/models/expert_he.py
+
 import tensorflow as tf
 from tensorflow.keras import layers
-from .vit import create_vit_model
+from .vit import create_vit_model  # Add this import
 
 def create_he_expert(input_shape, num_classes):
     vit_model = create_vit_model(
@@ -17,8 +19,10 @@ def create_he_expert(input_shape, num_classes):
     
     inputs = layers.Input(shape=input_shape)
     x = vit_model(inputs)
-    x = layers.Dense(256, activation="relu")(x)
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    
+    # Reshape the output to match the input image dimensions
+    x = layers.Dense(input_shape[0] * input_shape[1], activation="relu")(x)
+    outputs = layers.Reshape((input_shape[0], input_shape[1]))(x)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model

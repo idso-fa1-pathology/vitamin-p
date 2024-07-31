@@ -1,13 +1,20 @@
-import tensorflow as tf
+# src/utils/metrics.py
+
+import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 def calculate_metrics(y_true, y_pred):
-    y_pred_classes = tf.argmax(y_pred, axis=1)
+    # Ensure y_true and y_pred have the same shape
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
     
-    accuracy = accuracy_score(y_true, y_pred_classes)
-    precision = precision_score(y_true, y_pred_classes, average='weighted')
-    recall = recall_score(y_true, y_pred_classes, average='weighted')
-    f1 = f1_score(y_true, y_pred_classes, average='weighted')
+    # Convert probabilities to binary predictions
+    y_pred_binary = (y_pred > 0.5).astype(int)
+    
+    accuracy = accuracy_score(y_true, y_pred_binary)
+    precision = precision_score(y_true, y_pred_binary, average='binary')
+    recall = recall_score(y_true, y_pred_binary, average='binary')
+    f1 = f1_score(y_true, y_pred_binary, average='binary')
     
     return {
         'accuracy': accuracy,

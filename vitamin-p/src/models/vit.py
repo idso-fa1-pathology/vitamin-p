@@ -1,3 +1,5 @@
+# src/models/vit.py
+
 import tensorflow as tf
 from tensorflow.keras import layers
 
@@ -78,5 +80,6 @@ def create_vit_model(
 
     features = mlp(representation, hidden_units=mlp_head_units, dropout_rate=dropout_rate)
     logits = layers.Dense(num_classes)(features)
+    
     model = tf.keras.Model(inputs=inputs, outputs=logits)
     return model

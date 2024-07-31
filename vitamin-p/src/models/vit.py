@@ -1,5 +1,3 @@
-# src/models/vit.py
-
 import tensorflow as tf
 from tensorflow.keras import layers
 
@@ -66,7 +64,6 @@ def create_vit_model(
         padding="valid",
     )(inputs)
     patches = layers.Reshape((num_patches, projection_dim))(patches)
-
     encoded_patches = PatchEmbedding(num_patches, projection_dim)(patches)
 
     for _ in range(num_transformer_layers):
@@ -75,11 +72,14 @@ def create_vit_model(
         )(encoded_patches)
 
     representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    representation = layers.Flatten()(representation)
-    representation = layers.Dropout(0.5)(representation)
-
-    features = mlp(representation, hidden_units=mlp_head_units, dropout_rate=dropout_rate)
-    logits = layers.Dense(num_classes)(features)
     
-    model = tf.keras.Model(inputs=inputs, outputs=logits)
+    # Remove flattening and dropout
+    # representation = layers.Flatten()(representation)
+    # representation = layers.Dropout(0.5)(representation)
+    
+    # Remove MLP and final dense layer
+    # features = mlp(representation, hidden_units=mlp_head_units, dropout_rate=dropout_rate)
+    # logits = layers.Dense(num_classes)(features)
+
+    model = tf.keras.Model(inputs=inputs, outputs=representation)
     return model

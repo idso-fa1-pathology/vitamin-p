@@ -12,6 +12,30 @@ spec:
     spec:
       nodeSelector:
         "nvidia.com/gpu.present": "true"
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - H100-80GB-HBM3
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - A100-SXM4-80GB
+          - weight: 25
+            preference:
+              matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - A100-SXM4-40GB
       securityContext:
         runAsUser: 297724
         runAsGroup: 900027

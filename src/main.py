@@ -1,10 +1,13 @@
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
+import datetime
 import numpy as np
 from data.preprocessing import preprocess_pannuke_data
 from models.expert_he import create_he_expert
 import yaml
 import matplotlib.pyplot as plt
-import datetime
+
+print(f"TensorFlow version: {tf.__version__}")
 
 def load_config(config_path):
     with open(config_path, 'r') as file:
@@ -41,26 +44,32 @@ def plot_training_history(history):
 
 def weighted_bce(class_weights):
     def loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
         bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-        weights = tf.reduce_sum(class_weights * y_true, axis=-1)
+        weights = tf.reduce_sum(tf.cast(class_weights, tf.float32) * y_true, axis=-1)
         return tf.reduce_mean(bce * weights)
     return loss
 
 def weighted_focal_loss(alpha, gamma):
     def loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
         focal_loss = -alpha * y_true * tf.math.pow(1 - y_pred, gamma) * tf.math.log(y_pred)
         return tf.reduce_mean(tf.reduce_sum(focal_loss, axis=-1))
     return loss
 
 def dice_loss(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
     numerator = 2 * tf.reduce_sum(y_true * y_pred)
     denominator = tf.reduce_sum(y_true + y_pred)
     return 1 - numerator / denominator
 
+
 def augment_data(image, np_mask, hv_map, nt_mask, tc_label):
-    # Random flip left-right
     if tf.random.uniform(()) > 0.5:
         image = tf.image.flip_left_right(image)
         np_mask = tf.image.flip_left_right(np_mask)
@@ -68,7 +77,6 @@ def augment_data(image, np_mask, hv_map, nt_mask, tc_label):
         nt_mask = tf.image.flip_left_right(nt_mask)
         hv_map = tf.stack([hv_map[..., 0] * -1, hv_map[..., 1]], axis=-1)
 
-    # Random flip up-down
     if tf.random.uniform(()) > 0.5:
         image = tf.image.flip_up_down(image)
         np_mask = tf.image.flip_up_down(np_mask)
@@ -76,13 +84,8 @@ def augment_data(image, np_mask, hv_map, nt_mask, tc_label):
         nt_mask = tf.image.flip_up_down(nt_mask)
         hv_map = tf.stack([hv_map[..., 0], hv_map[..., 1] * -1], axis=-1)
 
-    # Random brightness
     image = tf.image.random_brightness(image, max_delta=0.2)
-    
-    # Random contrast
     image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-    
-    # Ensure image values are still in [0, 1]
     image = tf.clip_by_value(image, 0, 1)
 
     return image, np_mask, hv_map, nt_mask, tc_label
@@ -175,57 +178,95 @@ class GradientNormLogger(tf.keras.callbacks.Callback):
         self.learning_rates = []
 
 def main(dry_run=False):
+    # Load configurations
     data_config = load_config('configs/data_config.yaml')
     model_config = load_config('configs/model_config.yaml')
     training_config = load_config('configs/training_config.yaml')
 
+    # Set up GPUs
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logical_gpus = tf.config.experimental.list_logical_devices('GPU')
+            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+        except RuntimeError as e:
+            print(e)
+
+    # Set up distributed strategy
+    strategy = tf.distribute.MirroredStrategy()
+    print(f"Number of devices: {strategy.num_replicas_in_sync}")
+
+    # Adjust batch size
+    global_batch_size = model_config['global_batch_size']
+    per_gpu_batch_size = global_batch_size // strategy.num_replicas_in_sync
+    print(f"Global batch size: {global_batch_size}, Per-GPU batch size: {per_gpu_batch_size}")
+
+    # Set up mixed precision if enabled
+    if model_config.get('use_mixed_precision', False):
+        policy = mixed_precision.Policy('mixed_float16')
+        mixed_precision.set_global_policy(policy)
+        print("Mixed precision enabled")
+
+    # Prepare datasets
     train_dataset, val_dataset, test_dataset, unique_types, class_weight_dict = preprocess_pannuke_data(
         data_config['he_data_dir'],
         data_config['fold'],
-        model_config['batch_size'],
+        per_gpu_batch_size,
         augment_data
     )
     print(f"Unique tissue types: {unique_types}")
 
-    model, encoder = create_he_expert(model_config['input_shape'], model_config['num_classes'])
-    model.summary()
+    # Create and compile model within strategy scope
+    with strategy.scope():
+        model, encoder = create_he_expert(model_config['input_shape'], model_config['num_classes'])
+        
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=model_config['learning_rate'],
+            clipvalue=0.5
+        )
+        
+        if model_config.get('use_mixed_precision', False):
+            optimizer = mixed_precision.LossScaleOptimizer(optimizer)
 
-    optimizer = tf.keras.optimizers.Adam(clipvalue=0.5)
+        np_weights = tf.constant(list(class_weight_dict['np_branch'].values()), dtype=tf.float32)
+        nt_weights = tf.constant(list(class_weight_dict['nt_branch'].values()), dtype=tf.float32)
+        tc_weights = tf.constant(list(class_weight_dict['tc_branch'].values()), dtype=tf.float32)
 
-    np_weights = tf.constant(list(class_weight_dict['np_branch'].values()), dtype=tf.float32)
-    nt_weights = tf.constant(list(class_weight_dict['nt_branch'].values()), dtype=tf.float32)
-    tc_weights = tf.constant(list(class_weight_dict['tc_branch'].values()), dtype=tf.float32)
-
-    losses = {
-        'np_branch': lambda y_true, y_pred: weighted_bce(np_weights)(y_true, y_pred) + dice_loss(y_true, y_pred),
-        'hv_branch': tf.keras.losses.MeanSquaredError(),
-        'nt_branch': weighted_focal_loss(alpha=0.25, gamma=2.0),
-        'tc_branch': tf.keras.losses.CategoricalCrossentropy(from_logits=False)
-    }
-    loss_weights = {
-        'np_branch': 0.90,
-        'hv_branch': 1.0,
-        'nt_branch': 1.0,
-        'tc_branch': 1.0
-    }
-
-    model.compile(
-        optimizer=optimizer,
-        loss=losses,
-        loss_weights=loss_weights,
-        metrics={
-            'np_branch': [tf.keras.metrics.BinaryIoU(target_class_ids=[1], threshold=0.5)],
-            'hv_branch': [tf.keras.metrics.MeanAbsoluteError()],
-            'nt_branch': [tf.keras.metrics.CategoricalAccuracy()],
-            'tc_branch': [tf.keras.metrics.CategoricalAccuracy()]
+        losses = {
+            'np_branch': lambda y_true, y_pred: weighted_bce(np_weights)(y_true, y_pred) + dice_loss(y_true, y_pred),
+            'hv_branch': tf.keras.losses.MeanSquaredError(),
+            'nt_branch': weighted_focal_loss(alpha=0.25, gamma=2.0),
+            'tc_branch': tf.keras.losses.CategoricalCrossentropy(from_logits=False)
         }
-    )
+        loss_weights = {
+            'np_branch': 0.90,
+            'hv_branch': 1.0,
+            'nt_branch': 1.0,
+            'tc_branch': 1.0
+        }
 
-    total_steps = training_config['epochs'] * (len(train_dataset) // model_config['batch_size'])
+        model.compile(
+            optimizer=optimizer,
+            loss=losses,
+            loss_weights=loss_weights,
+            metrics={
+                'np_branch': [tf.keras.metrics.BinaryIoU(target_class_ids=[1], threshold=0.5)],
+                'hv_branch': [tf.keras.metrics.MeanAbsoluteError()],
+                'nt_branch': [tf.keras.metrics.CategoricalAccuracy()],
+                'tc_branch': [tf.keras.metrics.CategoricalAccuracy()]
+            }
+        )
+
+
+    # Calculate steps per epoch and total steps
+    steps_per_epoch = len(train_dataset) // global_batch_size
+    total_steps = training_config['epochs'] * steps_per_epoch
     warmup_steps = int(0.1 * total_steps)  # 10% of total steps for warm-up
 
+    # Set up callbacks
     callbacks = [
-        ShapePrintingCallback(train_dataset),
         tf.keras.callbacks.EarlyStopping(patience=training_config['early_stopping_patience']),
         tf.keras.callbacks.ModelCheckpoint(
             filepath=training_config['model_checkpoint_path'],
@@ -240,41 +281,78 @@ def main(dry_run=False):
         GradientNormLogger()
     ]
 
+    # Define distributed train step
+    @tf.function
+    def distributed_train_step(inputs):
+        def train_step(inputs):
+            images, labels = inputs
+            with tf.GradientTape() as tape:
+                predictions = model(images, training=True)
+                loss = model.compiled_loss(labels, predictions)
+            
+            gradients = tape.gradient(loss, model.trainable_variables)
+            model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+            model.compiled_metrics.update_state(labels, predictions)
+            return loss
+
+        per_replica_losses = strategy.run(train_step, args=(inputs,))
+        return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None)
+
+    # Training loop
+# Training loop
     try:
         if dry_run:
             print("Starting dry run...")
-            history = model.fit(
-                train_dataset.take(5),
-                epochs=2,
-                validation_data=val_dataset.take(2),
-                callbacks=callbacks
-            )
+            for epoch in range(2):
+                for step, x in enumerate(train_dataset.take(5)):
+                    loss = distributed_train_step(x)
+                    if step % 5 == 0:
+                        print(f"Epoch {epoch+1}, Step {step+1}, Loss: {loss:.4f}")
             print("Dry run completed successfully!")
         else:
             print("Starting full training...")
-            history = model.fit(
-                train_dataset,
-                epochs=training_config['epochs'],
-                validation_data=val_dataset,
-                callbacks=callbacks
-            )
+            for epoch in range(training_config['epochs']):
+                print(f"Epoch {epoch+1}/{training_config['epochs']}")
+                for step, x in enumerate(train_dataset):
+                    loss = distributed_train_step(x)
+                    if step % 100 == 0:
+                        print(f"Step {step+1}/{steps_per_epoch}, Loss: {loss:.4f}")
+                
+                # Validation step
+                val_losses = []
+                for x_val, y_val in val_dataset:
+                    val_loss = model.test_step((x_val, y_val))
+                    val_losses.append(val_loss)
+                avg_val_loss = tf.reduce_mean([loss['loss'] for loss in val_losses])
+                print(f"Validation Loss: {avg_val_loss:.4f}")
+                
+                # Call callbacks
+                for callback in callbacks:
+                    callback.on_epoch_end(epoch, {'loss': loss, 'val_loss': avg_val_loss})
+                
             print("Full training completed!")
 
-        plot_training_history(history)
+        # Final evaluation
+        test_losses = []
+        for x_test, y_test in test_dataset:
+            test_loss = model.test_step((x_test, y_test))
+            test_losses.append(test_loss)
+        avg_test_loss = tf.reduce_mean([loss['loss'] for loss in test_losses])
+        print(f"Test Loss: {avg_test_loss:.4f}")
 
-        test_results = model.evaluate(test_dataset)
-        print(f"Test Results: {test_results}")
-
+        # Save models
         model.save(training_config['final_model_path'])
         encoder.save(training_config['encoder_model_path'])
-
         print("Model and encoder saved.")
+
+        # Plot training history
+        plot_training_history(model.history)
 
     except Exception as e:
         print(f"An error occurred during training: {str(e)}")
         raise
 
-    print("Pipeline test completed.")
+    print("Training pipeline completed.")
 
 if __name__ == "__main__":
     main(dry_run=False)  # Set to False for full training

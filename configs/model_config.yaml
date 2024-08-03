@@ -1,14 +1,17 @@
 # configs/model_config.yaml
+# configs/model_config.yaml
 input_shape: [256, 256, 3]
 num_classes:
   tc_branch: 19
   nt_branch: 6
 learning_rate: 0.0001
-batch_size: 16
+global_batch_size: 256  # Increased to 256 (32 per GPU * 8 GPUs)
+per_gpu_batch_size: 32  # This will be divided by the number of GPUs in the code
 dropout_rate: 0.2
 l2_regularization: 0.01
-num_transformer_layers: 12
+num_transformer_layers: 16
 num_heads: 6
 projection_dim: 384
 mlp_head_units: [2048, 1024]
 patch_size: 16
+use_mixed_precision: true  # Added mixed precision flag

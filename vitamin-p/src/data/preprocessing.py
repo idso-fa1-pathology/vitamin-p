@@ -32,7 +32,7 @@ def create_hv_maps(masks):
     hv_maps = np.zeros((masks.shape[0], h, w, 2), dtype=np.float32)
     
     for i in range(masks.shape[0]):
-        for c in range(masks.shape[-1]):
+        for c in range(masks.shape[-1]):  # This will now iterate over 3 channels instead of 6
             mask = masks[i, ..., c]
             if mask.sum() > 0:
                 center_y, center_x = np.mean(np.where(mask), axis=1)
@@ -52,11 +52,15 @@ def load_fold(fold_path):
     # Convert images to float32 and normalize to [0, 1]
     images = images.astype(np.float32) / 255.0
     
-    # Create binary masks for NP branch
-    binary_masks = (masks.sum(axis=-1) > 0).astype(np.float32)
-    
+    # Create binary masks for NP branch using only the first three channels
+    binary_masks = (masks[..., :3].sum(axis=-1) > 0).astype(np.float32)
+    print(f"Binary masks shape: {binary_masks.shape}")
+    print(f"Binary masks unique values: {np.unique(binary_masks)}")
+    print(f"Binary masks min/max: {binary_masks.min()}/{binary_masks.max()}")
+    print(f"Percentage of non-zero binary mask pixels: {(binary_masks > 0).mean() * 100:.2f}%")
+
     # Create horizontal and vertical distance maps for HV branch
-    hv_maps = create_hv_maps(masks)
+    hv_maps = create_hv_maps(masks[..., :3])  # Use only the first three channels for HV maps
     
     # Convert string labels to integer indices
     unique_types = np.unique(types)
@@ -85,6 +89,10 @@ def preprocess_pannuke_data(data_dir, fold, batch_size, augment_fn=None):
 
     all_images = np.concatenate(all_images)
     all_binary_masks = np.concatenate(all_binary_masks)
+    print(f"All binary masks shape: {all_binary_masks.shape}")
+    print(f"All binary masks unique values: {np.unique(all_binary_masks)}")
+    print(f"All binary masks min/max: {all_binary_masks.min()}/{all_binary_masks.max()}")
+    print(f"Percentage of non-zero all binary mask pixels: {(all_binary_masks > 0).mean() * 100:.2f}%")
     all_hv_maps = np.concatenate(all_hv_maps)
     all_masks = np.concatenate(all_masks)
     all_types = np.concatenate(all_types)
@@ -134,6 +142,9 @@ def preprocess_pannuke_data(data_dir, fold, batch_size, augment_fn=None):
 
     # Create TensorFlow datasets
     def create_dataset(images, binary_masks, hv_maps, masks, types):
+        print(f"create_dataset binary_masks shape: {binary_masks.shape}")
+        print(f"create_dataset binary_masks unique values: {np.unique(binary_masks)}")
+        print(f"create_dataset binary_masks min/max: {binary_masks.min()}/{binary_masks.max()}")
         def prepare_data(image, labels):
             if augment_fn is not None and tf.random.uniform(()) > 0.5:  # Apply augmentation 50% of the time
                 image, labels['np_branch'], labels['hv_branch'], labels['nt_branch'], _ = augment_fn(

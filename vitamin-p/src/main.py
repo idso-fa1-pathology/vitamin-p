@@ -190,7 +190,7 @@ def main(dry_run=False):
     print(f"Unique tissue types: {unique_types}")
 
     # Create model
-    model, encoder = create_he_expert(model_config['input_shape'], len(unique_types))
+    model, encoder = create_he_expert(model_config['input_shape'], model_config['num_classes'])
     model.summary()
 
     # Define learning rate schedule
@@ -221,7 +221,7 @@ def main(dry_run=False):
     loss_weights = {
         'np_branch': 1.0,
         'hv_branch': 0.5,
-        'nt_branch': 0.1,
+        'nt_branch': 1.0,
         'tc_branch': 1.0
     }
 

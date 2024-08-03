@@ -1,5 +1,14 @@
 # configs/model_config.yaml
 input_shape: [256, 256, 3]
-num_classes: 1  # Binary segmentation (cell vs background)
-learning_rate: 0.000001
-batch_size: 32
+num_classes:
+  tc_branch: 19
+  nt_branch: 6
+learning_rate: 0.0001
+batch_size: 16
+dropout_rate: 0.1
+l2_regularization: 0.01
+num_transformer_layers: 8
+num_heads: 4
+projection_dim: 64
+mlp_head_units: [2048, 1024]
+patch_size: 16

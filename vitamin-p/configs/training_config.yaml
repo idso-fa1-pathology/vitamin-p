@@ -1,4 +1,10 @@
 # configs/training_config.yaml
-epochs: 200
-early_stopping_patience: 50
+
+# Existing configurations
+epochs: 100
+early_stopping_patience: 20
 model_checkpoint_path: 'models/checkpoints/model.h5'
+
+# New configurations
+final_model_path: 'models/saved_models/final_model.h5'
+encoder_model_path: 'models/saved_models/encoder_model.h5'

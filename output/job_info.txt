@@ -1,4 +1,0 @@
-Hello from Kubernetes job!
-Current time: 2024-07-26 21:00:20.007870
-Data directory: /rsrch5/home/plm/yshokrollahi/vitamin-p/data
-Output directory: /rsrch5/home/plm/yshokrollahi/vitamin-p/output

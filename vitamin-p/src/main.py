@@ -54,6 +54,11 @@ def weighted_focal_loss(alpha, gamma):
         return tf.reduce_mean(tf.reduce_sum(focal_loss, axis=-1))
     return loss
 
+def dice_loss(y_true, y_pred):
+    numerator = 2 * tf.reduce_sum(y_true * y_pred)
+    denominator = tf.reduce_sum(y_true + y_pred)
+    return 1 - numerator / denominator
+
 def augment_data(image, np_mask, hv_map, nt_mask, tc_label):
     # Random flip left-right
     if tf.random.uniform(()) > 0.5:
@@ -82,27 +87,32 @@ def augment_data(image, np_mask, hv_map, nt_mask, tc_label):
 
     return image, np_mask, hv_map, nt_mask, tc_label
 
-class WarmUpLearningRateScheduler(tf.keras.callbacks.Callback):
-    def __init__(self, warmup_batches, init_lr, verbose=0):
-        super(WarmUpLearningRateScheduler, self).__init__()
-        self.warmup_batches = warmup_batches
-        self.init_lr = init_lr
-        self.verbose = verbose
-        self.batch_count = 0
-        self.learning_rates = []
+class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
+    def __init__(self, learning_rate_base, total_steps, warmup_learning_rate=0.0, warmup_steps=0):
+        super(WarmUpCosineDecayScheduler, self).__init__()
+        self.learning_rate_base = learning_rate_base
+        self.total_steps = total_steps
+        self.warmup_learning_rate = warmup_learning_rate
+        self.warmup_steps = warmup_steps
+        self.pi = tf.constant(np.pi, dtype=tf.float32)
 
-    def on_batch_end(self, batch, logs=None):
-        self.batch_count = self.batch_count + 1
-        lr = tf.keras.backend.get_value(self.model.optimizer.lr)
-        self.learning_rates.append(lr)
+    def on_train_batch_begin(self, batch, logs=None):
+        step = tf.cast(self.model.optimizer.iterations, tf.float32)
+        total_steps = tf.cast(self.total_steps, tf.float32)
+        warmup_steps = tf.cast(self.warmup_steps, tf.float32)
 
-    def on_batch_begin(self, batch, logs=None):
-        if self.batch_count <= self.warmup_batches:
-            lr = self.batch_count * self.init_lr / self.warmup_batches
-            tf.keras.backend.set_value(self.model.optimizer.lr, lr)
-            if self.verbose > 0:
-                print('\nBatch %05d: WarmUpLearningRateScheduler setting learning '
-                      'rate to %s.' % (self.batch_count + 1, lr))
+        if step <= warmup_steps:
+            if warmup_steps > 0:
+                lr = ((self.learning_rate_base - self.warmup_learning_rate) *
+                     (step / warmup_steps) + self.warmup_learning_rate)
+            else:
+                lr = self.learning_rate_base
+        else:
+            lr = 0.5 * self.learning_rate_base * (1 + tf.cos(
+                self.pi *
+                (step - warmup_steps) / tf.maximum(total_steps - warmup_steps, 1.0)
+            ))
+        tf.keras.backend.set_value(self.model.optimizer.lr, lr)
 
 class GradientNormLogger(tf.keras.callbacks.Callback):
     def __init__(self):
@@ -128,16 +138,10 @@ class GradientNormLogger(tf.keras.callbacks.Callback):
                 y_pred = self.model(x, training=True)
                 loss = self.model.compiled_loss(y, y_pred, regularization_losses=self.model.losses)
             
-            # Compute gradients
             gradients = tape.gradient(loss, self.model.trainable_variables)
-            
-            # Compute gradient norm
             global_norm = tf.linalg.global_norm(gradients)
-            
-            # Apply gradients
             self.model.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
             
-            # Log gradient norm and learning rate
             tf.py_function(log_gradient_norm, [global_norm], Tout=tf.float32)
             
             if hasattr(self.model.optimizer, 'lr'):
@@ -149,11 +153,9 @@ class GradientNormLogger(tf.keras.callbacks.Callback):
                 current_lr = self.model.optimizer._decayed_lr(tf.float32)
                 tf.py_function(log_learning_rate, [current_lr], Tout=tf.float32)
 
-            # Log to TensorBoard
             tf.summary.scalar('gradient_norm', global_norm, step=self.model.optimizer.iterations)
             tf.summary.scalar('learning_rate', current_lr, step=self.model.optimizer.iterations)
             
-            # Update metrics
             self.model.compiled_metrics.update_state(y, y_pred)
             return {m.name: m.result() for m in self.model.metrics}
 
@@ -171,56 +173,38 @@ class GradientNormLogger(tf.keras.callbacks.Callback):
             print(f"Average Learning Rate for Epoch {epoch + 1}: {avg_learning_rate:.6f}")
         self.gradient_norms = []
         self.learning_rates = []
-       
-
 
 def main(dry_run=False):
-    # Load configurations
     data_config = load_config('configs/data_config.yaml')
     model_config = load_config('configs/model_config.yaml')
     training_config = load_config('configs/training_config.yaml')
 
-    # Preprocess data
     train_dataset, val_dataset, test_dataset, unique_types, class_weight_dict = preprocess_pannuke_data(
         data_config['he_data_dir'],
         data_config['fold'],
         model_config['batch_size'],
-        augment_data  # Pass the augmentation function
+        augment_data
     )
     print(f"Unique tissue types: {unique_types}")
 
-    # Create model
     model, encoder = create_he_expert(model_config['input_shape'], model_config['num_classes'])
     model.summary()
 
-    # Define learning rate schedule
-    initial_learning_rate = model_config['learning_rate']
-    lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
-        initial_learning_rate,
-        first_decay_steps=1000,
-        t_mul=2.0,
-        m_mul=0.9,
-        alpha=0.1
-    )
+    optimizer = tf.keras.optimizers.Adam(clipvalue=0.5)
 
-    # Define optimizer with gradient clipping
-    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule, clipvalue=0.5)
-
-    # Create weighted loss functions
     np_weights = tf.constant(list(class_weight_dict['np_branch'].values()), dtype=tf.float32)
     nt_weights = tf.constant(list(class_weight_dict['nt_branch'].values()), dtype=tf.float32)
     tc_weights = tf.constant(list(class_weight_dict['tc_branch'].values()), dtype=tf.float32)
 
-    # Compile model with custom losses and class weights
     losses = {
-        'np_branch': weighted_bce(np_weights),
+        'np_branch': lambda y_true, y_pred: weighted_bce(np_weights)(y_true, y_pred) + dice_loss(y_true, y_pred),
         'hv_branch': tf.keras.losses.MeanSquaredError(),
         'nt_branch': weighted_focal_loss(alpha=0.25, gamma=2.0),
         'tc_branch': tf.keras.losses.CategoricalCrossentropy(from_logits=False)
     }
     loss_weights = {
-        'np_branch': 1.0,
-        'hv_branch': 0.5,
+        'np_branch': 0.90,
+        'hv_branch': 1.0,
         'nt_branch': 1.0,
         'tc_branch': 1.0
     }
@@ -237,37 +221,32 @@ def main(dry_run=False):
         }
     )
 
-    # Define callbacks
-    callbacks = [ShapePrintingCallback(train_dataset)]
+    total_steps = training_config['epochs'] * (len(train_dataset) // model_config['batch_size'])
+    warmup_steps = int(0.1 * total_steps)  # 10% of total steps for warm-up
 
-    if not dry_run:
-        # Add additional callbacks for full training
-        callbacks.extend([
-            tf.keras.callbacks.EarlyStopping(patience=training_config['early_stopping_patience']),
-            tf.keras.callbacks.ModelCheckpoint(
-                filepath=training_config['model_checkpoint_path'],
-                save_best_only=True
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                verbose=1,
-                min_lr=1e-6
-            ),
-            WarmUpLearningRateScheduler(warmup_batches=1000, init_lr=1e-6, verbose=1),
-            tf.keras.callbacks.TensorBoard(log_dir="logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")),
-            GradientNormLogger()  # Use the new GradientNormLogger
-        ])
+    callbacks = [
+        ShapePrintingCallback(train_dataset),
+        tf.keras.callbacks.EarlyStopping(patience=training_config['early_stopping_patience']),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=training_config['model_checkpoint_path'],
+            save_best_only=True
+        ),
+        WarmUpCosineDecayScheduler(
+            learning_rate_base=model_config['learning_rate'],
+            total_steps=total_steps,
+            warmup_steps=warmup_steps
+        ),
+        tf.keras.callbacks.TensorBoard(log_dir="logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")),
+        GradientNormLogger()
+    ]
 
-    # Train model with error handling
     try:
         if dry_run:
             print("Starting dry run...")
             history = model.fit(
-                train_dataset.take(5),  # Only take 5 batches
-                epochs=2,  # Run for 2 epochs
-                validation_data=val_dataset.take(2),  # Only take 2 batches for validation
+                train_dataset.take(5),
+                epochs=2,
+                validation_data=val_dataset.take(2),
                 callbacks=callbacks
             )
             print("Dry run completed successfully!")
@@ -281,18 +260,12 @@ def main(dry_run=False):
             )
             print("Full training completed!")
 
-
-        # Plot training history
         plot_training_history(history)
 
-        # Evaluate model
         test_results = model.evaluate(test_dataset)
         print(f"Test Results: {test_results}")
 
-        # Save the model
         model.save(training_config['final_model_path'])
-        
-        # Save the encoder separately
         encoder.save(training_config['encoder_model_path'])
 
         print("Model and encoder saved.")

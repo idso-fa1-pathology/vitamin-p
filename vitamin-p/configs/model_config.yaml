@@ -5,10 +5,10 @@ num_classes:
   nt_branch: 6
 learning_rate: 0.0001
 batch_size: 16
-dropout_rate: 0.1
+dropout_rate: 0.2
 l2_regularization: 0.01
-num_transformer_layers: 8
-num_heads: 4
-projection_dim: 64
+num_transformer_layers: 12
+num_heads: 6
+projection_dim: 384
 mlp_head_units: [2048, 1024]
 patch_size: 16

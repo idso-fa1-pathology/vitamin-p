@@ -2,9 +2,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import swin_t, Swin_T_Weights
+import yaml
+import os
+
+def load_config(config_path):
+    # Get the directory of the current script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go up one level to the parent directory
+    parent_dir = os.path.dirname(current_dir)
+    # Construct the path to the config file
+    config_file_path = os.path.join(parent_dir, 'configs', config_path)
+    
+    with open(config_file_path, 'r') as file:
+        return yaml.safe_load(file)
+
+config = load_config('config.yaml')
 
 class SEBlock(nn.Module):
-    def __init__(self, channel, reduction=16):
+    def __init__(self, channel, reduction=config['seblock']['reduction']):
         super(SEBlock, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
@@ -28,7 +43,7 @@ class DecoderBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(min(32, out_channels), out_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.se = SEBlock(out_channels, reduction=8)
+        self.se = SEBlock(out_channels, reduction=config['seblock']['reduction'])
         self.residual_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
@@ -39,7 +54,7 @@ class DecoderBlock(nn.Module):
         return x + residual
 
 class SwinEncoder(nn.Module):
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=config['model']['encoder']['pretrained']):
         super().__init__()
         if pretrained:
             weights = Swin_T_Weights.IMAGENET1K_V1
@@ -55,31 +70,6 @@ class SwinEncoder(nn.Module):
             if i in [2, 4, 6]:  # Collect features from specific layers
                 features.append(x)
         return features
-
-class AttentionBlock(nn.Module):
-    def __init__(self, F_g, F_l, F_int):
-        super(AttentionBlock, self).__init__()
-        self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(min(32, F_int), F_int)
-        )
-        self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(min(32, F_int), F_int)
-        )
-        self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(1, 1),
-            nn.Sigmoid()
-        )
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, g, x):
-        g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        psi = self.relu(g1 + x1)
-        psi = self.psi(psi)
-        return x * psi
 
 class FPN(nn.Module):
     def __init__(self, in_channels_list, out_channels):
@@ -109,28 +99,21 @@ class FPN(nn.Module):
 class UNetDecoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fpn = FPN([192, 384, 768], 256)
-        self.decoder1 = DecoderBlock(256, 128)
-        self.decoder2 = DecoderBlock(128, 64)
-        self.decoder3 = DecoderBlock(64, 32)
-        self.decoder4 = DecoderBlock(32, 16)
-        self.final_conv = nn.Conv2d(16, 1, kernel_size=1)
+        decoder_config = config['model']['decoder']
+        self.fpn = FPN(decoder_config['fpn']['in_channels'], decoder_config['fpn']['out_channels'])
+        self.decoder_blocks = nn.ModuleList([
+            DecoderBlock(in_ch, out_ch) for in_ch, out_ch in decoder_config['decoder_blocks']
+        ])
+        self.final_conv = nn.Conv2d(decoder_config['decoder_blocks'][-1][1], decoder_config['final_out_channels'], kernel_size=1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, features):
         fpn_features = self.fpn([f.permute(0, 3, 1, 2) for f in features])
         
-        x = self.decoder1(fpn_features[-1])
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        
-        x = self.decoder2(x)
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        
-        x = self.decoder3(x)
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        
-        x = self.decoder4(x)
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        x = fpn_features[-1]
+        for decoder_block in self.decoder_blocks:
+            x = decoder_block(x)
+            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         
         x = self.final_conv(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)

@@ -1,22 +1,71 @@
 # Data
-base_path: "/path/to/your/data"
+data:
+  base_path: "data/raw/H&E"
+  image_size: [256, 256]
+  num_channels: 3
 
 # Model
-pretrained: true
+model:
+  name: "CellSwin"
+  pretrained: true
+  encoder:
+    name: "SwinEncoder"
+    pretrained: true
+  decoder:
+    name: "UNetDecoder"
+    fpn:
+      in_channels: [192, 384, 768]
+      out_channels: 256
+    decoder_blocks:
+      - [256, 128]
+      - [128, 64]
+      - [64, 32]
+      - [32, 16]
+    final_out_channels: 1
+
+# SEBlock
+seblock:
+  reduction: 16
 
 # Training
-batch_size: 16
-num_epochs: 100
-learning_rate: 1.0e-4
-patience: 20
+training:
+  batch_size: 16
+  num_epochs: 100
+  learning_rate: 1.0e-4
+  patience: 20
+  optimizer: "Adam"
+  loss_function: "FocalDiceLoss"
+  scheduler:
+    name: "ReduceLROnPlateau"
+    factor: 0.1
+    patience: 3
 
 # Augmentation
-augment_train: true
-augment_val: false
+augmentation:
+  train: true
+  val: false
+  transforms:
+    - hflip
+    - vflip
+    - rotate:
+        max_angle: 30
+    - gaussian_noise:
+        mean: 0
+        std: 0.1
+    - brightness:
+        factor_range: [0.8, 1.2]
+    - contrast:
+        factor_range: [0.8, 1.2]
 
 # Paths
-save_dir: "models/"
+paths:
+  save_dir: "checkpoints/"
+  log_dir: "checkpoints/logs/"
 
 # Metrics
-iou_threshold: 0.5
-distance_threshold: 12
+metrics:
+  iou_threshold: 0.5
+  distance_threshold: 12
+
+# Device
+device: "cuda"

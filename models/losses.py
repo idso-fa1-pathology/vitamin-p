@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+    
 class FocalDiceLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2, smooth=1e-5):
         super(FocalDiceLoss, self).__init__()

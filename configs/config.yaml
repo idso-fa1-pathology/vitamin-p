@@ -1,0 +1,22 @@
+# Data
+base_path: "/path/to/your/data"
+
+# Model
+pretrained: true
+
+# Training
+batch_size: 16
+num_epochs: 100
+learning_rate: 1.0e-4
+patience: 20
+
+# Augmentation
+augment_train: true
+augment_val: false
+
+# Paths
+save_dir: "models/"
+
+# Metrics
+iou_threshold: 0.5
+distance_threshold: 12

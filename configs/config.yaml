@@ -1,3 +1,4 @@
+#all config files should be here
 # Data
 data:
   base_path: "data/raw/H&E"

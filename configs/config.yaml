@@ -1,72 +1,25 @@
-#all config files should be here
-# Data
+# Data configuration
 data:
-  base_path: "data/raw/H&E"
-  image_size: [256, 256]
-  num_channels: 3
-
-# Model
-model:
-  name: "CellSwin"
-  pretrained: true
-  encoder:
-    name: "SwinEncoder"
-    pretrained: true
-  decoder:
-    name: "UNetDecoder"
-    fpn:
-      in_channels: [192, 384, 768]
-      out_channels: 256
-    decoder_blocks:
-      - [256, 128]
-      - [128, 64]
-      - [64, 32]
-      - [32, 16]
-    final_out_channels: 1
-
-# SEBlock
-seblock:
-  reduction: 16
-
-# Training
-training:
+  path: '/rsrch5/home/plm/yshokrollahi/project4/models/mesmer/tissuenet_v1.1'
   batch_size: 16
+
+# Model configuration
+model:
+  name: 'ModifiedCellSwin'
+
+# Training configuration
+training:
   num_epochs: 100
-  learning_rate: 1.0e-4
-  patience: 20
-  optimizer: "Adam"
-  loss_function: "FocalDiceLoss"
-  scheduler:
-    name: "ReduceLROnPlateau"
-    factor: 0.1
-    patience: 3
+  learning_rate: 1.0e-5  # Explicitly using scientific notation for clarity
+  save_interval: 20
 
-# Augmentation
-augmentation:
-  train: true
-  val: false
-  transforms:
-    - hflip
-    - vflip
-    - rotate:
-        max_angle: 30
-    - gaussian_noise:
-        mean: 0
-        std: 0.1
-    - brightness:
-        factor_range: [0.8, 1.2]
-    - contrast:
-        factor_range: [0.8, 1.2]
+# Loss configuration
+loss:
+  bce_weight: 0.5
+  dice_weight: 0.5
+  hv_weight: 3.0
+  hv_mse_weight: 0.5
+  hv_msge_weight: 0.5
 
-# Paths
-paths:
-  save_dir: "checkpoints/"
-  log_dir: "checkpoints/logs/"
-
-# Metrics
-metrics:
-  iou_threshold: 0.5
-  distance_threshold: 12
-
-# Device
-device: "cuda"
+# Device configuration
+device: 'cuda'  # or 'cpu'

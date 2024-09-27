@@ -1,116 +1,151 @@
 import torch
-import os
-import numpy as np
+from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from models.losses import FocalDiceLoss
-from models.metrics import iou_score, calculate_object_based_metrics
+from tqdm import tqdm
+import os
 
-def train_model(model, train_loader, val_loader, num_epochs=100, patience=20, save_dir='checkpoints'):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def validate_model(model, val_loader, criterion, device):
+    model.eval()
+    val_loss = 0.0
+    val_cell_loss = 0.0
+    val_nuclear_loss = 0.0
+    val_cell_hv_loss = 0.0
+    val_nuclei_hv_loss = 0.0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            images, cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps = batch
+
+            images = images.to(device)
+            cell_masks = cell_masks.to(device)
+            nuclei_masks = nuclei_masks.to(device)
+            cell_hv_maps = cell_hv_maps.to(device)
+            nuclei_hv_maps = nuclei_hv_maps.to(device)
+
+            cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred = model(images)
+
+            loss, cell_loss, nuclear_loss, cell_hv_loss, nuclei_hv_loss = criterion(
+                cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred,
+                cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps
+            )
+
+            val_loss += loss.item()
+            val_cell_loss += cell_loss.item()
+            val_nuclear_loss += nuclear_loss.item()
+            val_cell_hv_loss += cell_hv_loss.item()
+            val_nuclei_hv_loss += nuclei_hv_loss.item()
+
+    val_loss /= len(val_loader)
+    val_cell_loss /= len(val_loader)
+    val_nuclear_loss /= len(val_loader)
+    val_cell_hv_loss /= len(val_loader)
+    val_nuclei_hv_loss /= len(val_loader)
+
+    return val_loss, val_cell_loss, val_nuclear_loss, val_cell_hv_loss, val_nuclei_hv_loss
+
+def train_model(model, train_loader, val_loader, criterion, num_epochs=100, learning_rate=1e-5, save_interval=20):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    criterion = FocalDiceLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+    optimizer = Adam(model.parameters(), lr=learning_rate)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
 
+    save_dir = "saved_models"
     os.makedirs(save_dir, exist_ok=True)
-    best_val_loss = float('inf')
-    best_model = None
-    counter = 0
+
+    # Set gradient clipping threshold
+    max_grad_norm = 1.0
+
+    # Set gradient accumulation steps
+    accumulation_steps = 4
 
     for epoch in range(num_epochs):
         model.train()
-        train_loss = 0
-        train_iou = 0
-        train_precision = 0
-        train_recall = 0
-        train_f1 = 0
+        train_loss = 0.0
+        train_cell_loss = 0.0
+        train_nuclear_loss = 0.0
+        train_cell_hv_loss = 0.0
+        train_nuclei_hv_loss = 0.0
+        
+        optimizer.zero_grad()  # Reset gradients at the start of each epoch
+        
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
+            images, cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps = batch
 
-        for images, masks in train_loader:
-            images = images.float().to(device)
-            masks = masks.float().to(device)
+            images = images.to(device)
+            cell_masks = cell_masks.to(device)
+            nuclei_masks = nuclei_masks.to(device)
+            cell_hv_maps = cell_hv_maps.to(device)
+            nuclei_hv_maps = nuclei_hv_maps.to(device)
+            
+            cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred = model(images)
+            
+            loss, cell_loss, nuclear_loss, cell_hv_loss, nuclei_hv_loss = criterion(
+                cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred,
+                cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps
+            )
+            
+            # Normalize the loss to account for gradient accumulation
+            loss = loss / accumulation_steps
+            
+            if torch.isnan(loss) or torch.isnan(cell_loss) or torch.isnan(nuclear_loss) or \
+               torch.isnan(cell_hv_loss) or torch.isnan(nuclei_hv_loss):
+                print(f"NaN detected in loss calculation at batch {batch_idx}")
+                print(f"Loss: {loss.item()}, Cell Loss: {cell_loss.item()}, Nuclear Loss: {nuclear_loss.item()}, "
+                      f"Cell HV Loss: {cell_hv_loss.item()}, Nuclei HV Loss: {nuclei_hv_loss.item()}")
+                continue
 
-            optimizer.zero_grad()
-            outputs = model(images)
-
-            loss = criterion(outputs, masks)
             loss.backward()
-            optimizer.step()
+            
+            if (batch_idx + 1) % accumulation_steps == 0:
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                
+                # Gradient monitoring
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        if grad_norm > 10:  # Adjust this threshold as needed
+                            print(f"Large gradient in {name}: {grad_norm}")
+                        if torch.isnan(param.grad).any():
+                            print(f"NaN detected in gradients of {name} at batch {batch_idx}")
+                
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            train_loss += loss.item() * accumulation_steps  # Multiply by accumulation steps to get the actual loss
+            train_cell_loss += cell_loss.item()
+            train_nuclear_loss += nuclear_loss.item()
+            train_cell_hv_loss += cell_hv_loss.item()
+            train_nuclei_hv_loss += nuclei_hv_loss.item()
+        
+        train_loss /= len(train_loader)
+        train_cell_loss /= len(train_loader)
+        train_nuclear_loss /= len(train_loader)
+        train_cell_hv_loss /= len(train_loader)
+        train_nuclei_hv_loss /= len(train_loader)
+        
+        val_loss, val_cell_loss, val_nuclear_loss, val_cell_hv_loss, val_nuclei_hv_loss = validate_model(model, val_loader, criterion, device)
+        
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train Loss: {train_loss:.4f}, Cell Loss: {train_cell_loss:.4f}, Nuclear Loss: {train_nuclear_loss:.4f}, "
+              f"Cell HV Loss: {train_cell_hv_loss:.4f}, Nuclei HV Loss: {train_nuclei_hv_loss:.4f}")
+        print(f"Val Loss: {val_loss:.4f}, Cell Loss: {val_cell_loss:.4f}, Nuclear Loss: {val_nuclear_loss:.4f}, "
+              f"Cell HV Loss: {val_cell_hv_loss:.4f}, Nuclei HV Loss: {val_nuclei_hv_loss:.4f}")
+        
+        scheduler.step(val_loss)
 
-            train_loss += loss.item()
-            train_iou += iou_score(outputs, masks).item()
+        if (epoch + 1) % save_interval == 0:
+            save_path = os.path.join(save_dir, f"new_model_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+            }, save_path)
+            print(f"Model saved at epoch {epoch+1}")
 
-            pred_masks = (outputs > 0.5).float()
-            batch_precision, batch_recall, batch_f1 = 0, 0, 0
-            for true_mask, pred_mask in zip(masks, pred_masks):
-                p, r, f = calculate_object_based_metrics(true_mask, pred_mask)
-                batch_precision += p
-                batch_recall += r
-                batch_f1 += f
-
-            train_precision += batch_precision / len(masks)
-            train_recall += batch_recall / len(masks)
-            train_f1 += batch_f1 / len(masks)
-
-        avg_train_loss = train_loss / len(train_loader)
-        avg_train_iou = train_iou / len(train_loader)
-        avg_train_precision = train_precision / len(train_loader)
-        avg_train_recall = train_recall / len(train_loader)
-        avg_train_f1 = train_f1 / len(train_loader)
-
-        # Validation
-        model.eval()
-        val_loss = 0
-        val_iou = 0
-        val_precision = 0
-        val_recall = 0
-        val_f1 = 0
-
-        with torch.no_grad():
-            for images, masks in val_loader:
-                images = images.float().to(device)
-                masks = masks.float().to(device)
-                outputs = model(images)
-                loss = criterion(outputs, masks)
-                val_loss += loss.item()
-                val_iou += iou_score(outputs, masks).item()
-
-                pred_masks = (outputs > 0.5).float()
-                batch_precision, batch_recall, batch_f1 = 0, 0, 0
-                for true_mask, pred_mask in zip(masks, pred_masks):
-                    p, r, f = calculate_object_based_metrics(true_mask, pred_mask)
-                    batch_precision += p
-                    batch_recall += r
-                    batch_f1 += f
-
-                val_precision += batch_precision / len(masks)
-                val_recall += batch_recall / len(masks)
-                val_f1 += batch_f1 / len(masks)
-
-        avg_val_loss = val_loss / len(val_loader)
-        avg_val_iou = val_iou / len(val_loader)
-        avg_val_precision = val_precision / len(val_loader)
-        avg_val_recall = val_recall / len(val_loader)
-        avg_val_f1 = val_f1 / len(val_loader)
-
-        print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'Train Loss: {avg_train_loss:.4f}, Train IoU: {avg_train_iou:.4f}, Train Precision: {avg_train_precision:.4f}, Train Recall: {avg_train_recall:.4f}, Train F1: {avg_train_f1:.4f}')
-        print(f'Val Loss: {avg_val_loss:.4f}, Val IoU: {avg_val_iou:.4f}, Val Precision: {avg_val_precision:.4f}, Val Recall: {avg_val_recall:.4f}, Val F1: {avg_val_f1:.4f}')
-
-        scheduler.step(avg_val_loss)
-
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_model = model.state_dict()
-            counter = 0
-            save_path = os.path.join(save_dir, 'v1.pth')
-            torch.save(best_model, save_path)
-            print(f"Saved best model with validation loss: {best_val_loss:.4f}")
-        else:
-            counter += 1
-
-        if counter >= patience:
-            print(f"Early stopping triggered after {epoch+1} epochs")
-            break
-
-    model.load_state_dict(best_model)
     return model
+
+# Make sure to include your validate_model function here as well

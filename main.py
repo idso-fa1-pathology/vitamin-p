@@ -16,11 +16,17 @@ def main():
     config_path = os.path.join(os.path.dirname(__file__), 'configs', 'config.yaml')
     config = load_config(config_path)
 
+    print(f"Config loaded. Data path: {config['data']['path']}")
+
     # Get data loaders
     train_loader, val_loader, test_loader = get_data_loaders(
         config['data']['path'], 
         batch_size=config['data']['batch_size']
     )
+
+    if train_loader is None:
+        print("Error: train_loader is None. Check data loading process.")
+        return
 
     # Initialize model
     model = ModifiedCellSwin()
@@ -45,7 +51,7 @@ def main():
         val_loader, 
         criterion, 
         num_epochs=config['training']['num_epochs'], 
-        learning_rate=float(config['training']['learning_rate']),  # Convert to float
+        learning_rate=float(config['training']['learning_rate']),
         save_interval=config['training']['save_interval']
     )
 

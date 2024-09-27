@@ -1,3 +1,0 @@
-# configs/data_config.yaml
-he_data_dir: '/rsrch5/home/plm/yshokrollahi/vitamin-p/vitamin-p/data/raw/H&E'
-fold: 1  # Change this to 2 or 3 for different cross-validation folds

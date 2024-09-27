@@ -65,53 +65,86 @@ def train_model(model, train_loader, val_loader, criterion, num_epochs=100, lear
         
         optimizer.zero_grad()
         
-        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
-            images, cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps = batch
+        try:
+            for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
+                try:
+                    images, cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps = batch
+                except ValueError as e:
+                    print(f"Error unpacking batch: {e}")
+                    print(f"Batch shape: {[b.shape if isinstance(b, torch.Tensor) else type(b) for b in batch]}")
+                    continue
 
-            images = images.to(device)
-            cell_masks = cell_masks.to(device)
-            nuclei_masks = nuclei_masks.to(device)
-            cell_hv_maps = cell_hv_maps.to(device)
-            nuclei_hv_maps = nuclei_hv_maps.to(device)
-            
-            cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred = model(images)
-            
-            loss, cell_loss, nuclear_loss, cell_hv_loss, nuclei_hv_loss = criterion(
-                cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred,
-                cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps
-            )
-            
-            loss = loss / accumulation_steps
-            
-            if torch.isnan(loss) or torch.isnan(cell_loss) or torch.isnan(nuclear_loss) or \
-               torch.isnan(cell_hv_loss) or torch.isnan(nuclei_hv_loss):
-                print(f"NaN detected in loss calculation at batch {batch_idx}")
-                print(f"Loss: {loss.item()}, Cell Loss: {cell_loss.item()}, Nuclear Loss: {nuclear_loss.item()}, "
-                      f"Cell HV Loss: {cell_hv_loss.item()}, Nuclei HV Loss: {nuclei_hv_loss.item()}")
-                continue
+                try:
+                    images = images.to(device)
+                    cell_masks = cell_masks.to(device)
+                    nuclei_masks = nuclei_masks.to(device)
+                    cell_hv_maps = cell_hv_maps.to(device)
+                    nuclei_hv_maps = nuclei_hv_maps.to(device)
+                except Exception as e:
+                    print(f"Error moving tensors to device: {e}")
+                    continue
+                
+                try:
+                    cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred = model(images)
+                except RuntimeError as e:
+                    print(f"Error in model forward pass: {e}")
+                    print(f"Input shapes: images={images.shape}, cell_masks={cell_masks.shape}, "
+                          f"nuclei_masks={nuclei_masks.shape}, cell_hv_maps={cell_hv_maps.shape}, "
+                          f"nuclei_hv_maps={nuclei_hv_maps.shape}")
+                    continue
+                
+                try:
+                    loss, cell_loss, nuclear_loss, cell_hv_loss, nuclei_hv_loss = criterion(
+                        cell_seg_pred, nuclear_seg_pred, cell_hv_pred, nuclei_hv_pred,
+                        cell_masks, nuclei_masks, cell_hv_maps, nuclei_hv_maps
+                    )
+                except Exception as e:
+                    print(f"Error in loss calculation: {e}")
+                    continue
+                
+                loss = loss / accumulation_steps
+                
+                if torch.isnan(loss) or torch.isnan(cell_loss) or torch.isnan(nuclear_loss) or \
+                   torch.isnan(cell_hv_loss) or torch.isnan(nuclei_hv_loss):
+                    print(f"NaN detected in loss calculation at batch {batch_idx}")
+                    print(f"Loss: {loss.item()}, Cell Loss: {cell_loss.item()}, Nuclear Loss: {nuclear_loss.item()}, "
+                          f"Cell HV Loss: {cell_hv_loss.item()}, Nuclei HV Loss: {nuclei_hv_loss.item()}")
+                    continue
 
-            loss.backward()
-            
-            if (batch_idx + 1) % accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                loss.backward()
                 
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = param.grad.norm().item()
-                        if grad_norm > 10:
-                            print(f"Large gradient in {name}: {grad_norm}")
-                        if torch.isnan(param.grad).any():
-                            print(f"NaN detected in gradients of {name} at batch {batch_idx}")
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = param.grad.norm().item()
+                            if grad_norm > 10:
+                                print(f"Large gradient in {name}: {grad_norm}")
+                            if torch.isnan(param.grad).any():
+                                print(f"NaN detected in gradients of {name} at batch {batch_idx}")
+                    
+                    optimizer.step()
+                    optimizer.zero_grad()
                 
-                optimizer.step()
-                optimizer.zero_grad()
+                train_loss += loss.item() * accumulation_steps
+                train_cell_loss += cell_loss.item()
+                train_nuclear_loss += nuclear_loss.item()
+                train_cell_hv_loss += cell_hv_loss.item()
+                train_nuclei_hv_loss += nuclei_hv_loss.item()
+                
+                if batch_idx % 100 == 0:
+                    print(f"Batch {batch_idx}/{len(train_loader)}, "
+                          f"Loss: {loss.item():.4f}, Cell Loss: {cell_loss.item():.4f}, "
+                          f"Nuclear Loss: {nuclear_loss.item():.4f}")
             
-            train_loss += loss.item() * accumulation_steps
-            train_cell_loss += cell_loss.item()
-            train_nuclear_loss += nuclear_loss.item()
-            train_cell_hv_loss += cell_hv_loss.item()
-            train_nuclei_hv_loss += nuclei_hv_loss.item()
-        
+        except Exception as e:
+            print(f"Unexpected error during training: {e}")
+            print("Traceback:")
+            import traceback
+            traceback.print_exc()
+            continue
+
         train_loss /= len(train_loader)
         train_cell_loss /= len(train_loader)
         train_nuclear_loss /= len(train_loader)
@@ -141,3 +174,5 @@ def train_model(model, train_loader, val_loader, criterion, num_epochs=100, lear
             print(f"Model saved at epoch {epoch+1}")
 
     return model
+
+# Make sure to include your validate_model function here as well

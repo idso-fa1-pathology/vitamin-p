@@ -1,0 +1,25 @@
+# Data configuration
+data:
+  path: '/rsrch5/home/plm/yshokrollahi/project4/models/mesmer/tissuenet_v1.1'
+  batch_size: 16
+
+# Model configuration
+model:
+  name: 'ModifiedCellSwin'
+
+# Training configuration
+training:
+  num_epochs: 100
+  learning_rate: 1.0e-5  # Explicitly using scientific notation for clarity
+  save_interval: 20
+
+# Loss configuration
+loss:
+  bce_weight: 0.5
+  dice_weight: 0.5
+  hv_weight: 3.0
+  hv_mse_weight: 0.5
+  hv_msge_weight: 0.5
+
+# Device configuration
+device: 'cuda'  # or 'cpu'

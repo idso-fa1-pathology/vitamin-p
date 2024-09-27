@@ -126,6 +126,137 @@ class TissueNetDataset(Dataset):
         return hv_map
 
     # ... (other methods like apply_augmentation, elastic_transform, apply_slic, zoom_blur)
+    def apply_augmentation(self, image, cell_mask, nuclei_mask, cell_hv_map, nuclei_hv_map):
+        # Convert numpy arrays to tensors
+        image = torch.from_numpy(image).permute(2, 0, 1)
+        cell_mask = torch.from_numpy(cell_mask).unsqueeze(0)
+        nuclei_mask = torch.from_numpy(nuclei_mask).unsqueeze(0)
+        cell_hv_map = torch.from_numpy(cell_hv_map).permute(2, 0, 1)
+        nuclei_hv_map = torch.from_numpy(nuclei_hv_map).permute(2, 0, 1)
+
+        original_size = image.shape[1:]
+
+        # Random 90-degree rotation
+        if torch.rand(1) < 0.5:
+            k = torch.randint(1, 4, (1,)).item()
+            image = torch.rot90(image, k, [1, 2])
+            cell_mask = torch.rot90(cell_mask, k, [1, 2])
+            nuclei_mask = torch.rot90(nuclei_mask, k, [1, 2])
+            cell_hv_map = torch.rot90(cell_hv_map, k, [1, 2])
+            nuclei_hv_map = torch.rot90(nuclei_hv_map, k, [1, 2])
+
+        # Random horizontal flip
+        if torch.rand(1) < 0.5:
+            image = TF.hflip(image)
+            cell_mask = TF.hflip(cell_mask)
+            nuclei_mask = TF.hflip(nuclei_mask)
+            cell_hv_map = TF.hflip(cell_hv_map)
+            nuclei_hv_map = TF.hflip(nuclei_hv_map)
+            cell_hv_map[0] = -cell_hv_map[0]  # Flip horizontal map
+            nuclei_hv_map[0] = -nuclei_hv_map[0]  # Flip horizontal map
+
+        # Random vertical flip
+        if torch.rand(1) < 0.5:
+            image = TF.vflip(image)
+            cell_mask = TF.vflip(cell_mask)
+            nuclei_mask = TF.vflip(nuclei_mask)
+            cell_hv_map = TF.vflip(cell_hv_map)
+            nuclei_hv_map = TF.vflip(nuclei_hv_map)
+            cell_hv_map[1] = -cell_hv_map[1]  # Flip vertical map
+            nuclei_hv_map[1] = -nuclei_hv_map[1]  # Flip vertical map
+
+        # Random scaling (downscaling)
+        if torch.rand(1) < 0.5:
+            scale_factor = torch.FloatTensor(1).uniform_(0.8, 1.0).item()
+            new_size = [max(224, int(s * scale_factor)) for s in image.shape[1:]]
+            image = TF.resize(image, new_size)
+            cell_mask = TF.resize(cell_mask, new_size, interpolation=TF.InterpolationMode.NEAREST)
+            nuclei_mask = TF.resize(nuclei_mask, new_size, interpolation=TF.InterpolationMode.NEAREST)
+            cell_hv_map = TF.resize(cell_hv_map, new_size)
+            nuclei_hv_map = TF.resize(nuclei_hv_map, new_size)
+
+        # Ensure image is large enough for subsequent operations
+        if min(image.shape[1:]) < 224:
+            scale_factor = 224 / min(image.shape[1:])
+            new_size = [int(s * scale_factor) for s in image.shape[1:]]
+            image = TF.resize(image, new_size)
+            cell_mask = TF.resize(cell_mask, new_size, interpolation=TF.InterpolationMode.NEAREST)
+            nuclei_mask = TF.resize(nuclei_mask, new_size, interpolation=TF.InterpolationMode.NEAREST)
+            cell_hv_map = TF.resize(cell_hv_map, new_size)
+            nuclei_hv_map = TF.resize(nuclei_hv_map, new_size)
+
+        # Resize back to original size
+        image = TF.resize(image, original_size)
+        cell_mask = TF.resize(cell_mask, original_size, interpolation=TF.InterpolationMode.NEAREST)
+        nuclei_mask = TF.resize(nuclei_mask, original_size, interpolation=TF.InterpolationMode.NEAREST)
+        cell_hv_map = TF.resize(cell_hv_map, original_size)
+        nuclei_hv_map = TF.resize(nuclei_hv_map, original_size)
+
+        return image, cell_mask, nuclei_mask, cell_hv_map, nuclei_hv_map
+
+    def elastic_transform(self, image, alpha=1, sigma=0.1, alpha_affine=0.1, is_mask=False):
+        """Elastic deformation of images as described in [Simard2003]_."""
+        random_state = np.random.RandomState(None)
+
+        if image.ndim == 2:
+            shape = image.shape
+        elif image.ndim == 3:
+            shape = image.shape[:2]
+        else:
+            raise ValueError("Image must be 2D or 3D")
+
+        # Random affine
+        center_square = np.float32(shape) // 2
+        square_size = min(shape) // 3
+        pts1 = np.float32([center_square + square_size, [center_square[0]+square_size, center_square[1]-square_size], center_square - square_size])
+        pts2 = pts1 + random_state.uniform(-alpha_affine, alpha_affine, size=pts1.shape).astype(np.float32)
+        M = cv2.getAffineTransform(pts1, pts2)
+
+        if is_mask:
+            if image.ndim == 2:
+                image = cv2.warpAffine(image, M, shape[::-1], borderMode=cv2.BORDER_CONSTANT, flags=cv2.INTER_NEAREST)
+            else:
+                image = np.stack([cv2.warpAffine(image[:,:,i], M, shape[::-1], borderMode=cv2.BORDER_CONSTANT, flags=cv2.INTER_NEAREST) for i in range(image.shape[2])], axis=2)
+        else:
+            if image.ndim == 2:
+                image = cv2.warpAffine(image, M, shape[::-1], borderMode=cv2.BORDER_REFLECT_101)
+            else:
+                image = np.stack([cv2.warpAffine(image[:,:,i], M, shape[::-1], borderMode=cv2.BORDER_REFLECT_101) for i in range(image.shape[2])], axis=2)
+
+        dx = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma) * alpha
+        dy = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma) * alpha
+
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        indices = np.reshape(y+dy, (-1, 1)), np.reshape(x+dx, (-1, 1))
+
+        if is_mask:
+            if image.ndim == 2:
+                return map_coordinates(image, indices, order=0, mode='constant').reshape(shape)
+            else:
+                return np.stack([map_coordinates(image[:,:,i], indices, order=0, mode='constant').reshape(shape) for i in range(image.shape[2])], axis=2)
+        else:
+            if image.ndim == 2:
+                return map_coordinates(image, indices, order=1, mode='reflect').reshape(shape)
+            else:
+                return np.stack([map_coordinates(image[:,:,i], indices, order=1, mode='reflect').reshape(shape) for i in range(image.shape[2])], axis=2)
+
+    def apply_slic(self, image):
+        image_np = image.numpy().transpose(1, 2, 0)
+        segments = slic(image_np, n_segments=100, compactness=10, sigma=1)
+        out = np.zeros_like(image_np)
+        for i in np.unique(segments):
+            mask = segments == i
+            out[mask] = np.mean(image_np[mask], axis=0)
+        return torch.from_numpy(out.transpose(2, 0, 1))
+
+    def zoom_blur(self, image, max_factor=1.2):
+        c, h, w = image.shape
+        zoom_factor = torch.FloatTensor(1).uniform_(1, max_factor).item()
+        zh = int(np.round(h * zoom_factor))
+        zw = int(np.round(w * zoom_factor))
+        zoom_image = TF.resize(image, (zh, zw))
+        zoom_image = TF.center_crop(zoom_image, (h, w))
+        return (image + zoom_image) / 2
 
 # Define transforms
 image_transform = transforms.Compose([

@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: yshokrollahi-vitamin-p-new-job
+  name: yshokrollahi-vitamin-p-mif
   namespace: yn-gpu-workload
   labels:
     k8s-user: yshokrollahi
@@ -12,7 +12,6 @@ spec:
     spec:
       nodeSelector:
         "nvidia.com/gpu.present": "true"
-        "nvidia.com/gpu.machine": "DGXH100"
       securityContext:
         runAsUser: 297724
         runAsGroup: 900027
@@ -20,17 +19,17 @@ spec:
       containers:
         - name: main
           image: hpcharbor.mdanderson.edu/yshokrollahi/cellvit@sha256:0b9813cd0c39eb4f8e2f5293a29f47379eb9c0f850540c39ed8f7cdd0129dcaf
-          command: ["/usr/bin/python3", "/rsrch5/home/plm/yshokrollahi/vitamin-p-new/main.py"]
-          workingDir: "/rsrch5/home/plm/yshokrollahi/vitamin-p-new"
+          command: ["/usr/bin/python3", "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF/main.py"]
+          workingDir: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
           env:
             - name: HOME
               value: "/rsrch5/home/plm/yshokrollahi/"
             - name: CODE_DIR
-              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-new"
+              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
             - name: DATA_DIR
-              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-new/data"
+              value: "/rsrch5/home/plm/yshokrollahi/data/tissuenet_v1.1"
             - name: PYTHONPATH
-              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-new"
+              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
           volumeMounts:
             - name: shm
               mountPath: "/dev/shm"

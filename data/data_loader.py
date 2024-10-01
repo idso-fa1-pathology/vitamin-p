@@ -259,7 +259,7 @@ class CellSegmentationDataset(Dataset):
         return image, binary_mask, multi_class_mask, hv_map
 
 # Usage example
-def get_dataloaders(base_path, batch_size=16):
+def get_data_loaders(base_path, batch_size=16):
     all_images, all_masks, all_types = load_all_folds(base_path)
     data_splits = create_train_val_test_split(all_images, all_masks, all_types)
 

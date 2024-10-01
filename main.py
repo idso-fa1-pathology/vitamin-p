@@ -2,7 +2,7 @@ import os
 import yaml
 import torch
 from models.model import ModifiedCellSwin
-from utils.losses import CombinedLoss
+from utils.losses import get_loss_function
 from train.train import train_model
 from data.data_loader import get_data_loaders
 
@@ -19,24 +19,21 @@ def main():
 
     # Get data loaders
     train_loader, val_loader, test_loader = get_data_loaders(
-        config['data']['path'],
+        base_path=config['data']['path'],
         batch_size=config['data']['batch_size']
     )
-    if train_loader is None:
-        print("Error: train_loader is None. Check data loading process.")
+    
+    if train_loader is None or val_loader is None or test_loader is None:
+        print("Error: One or more data loaders are None. Check data loading process.")
         return
 
     # Initialize model
-    model = ModifiedCellSwin(num_cell_classes=5, num_tissue_classes=19)
+    model = ModifiedCellSwin(num_cell_classes=config['model']['num_cell_classes'], 
+                             num_tissue_classes=config['model']['num_tissue_classes'])
 
     # Initialize loss function
-    criterion = CombinedLoss(
-        bce_weight=config['loss']['bce_weight'],
-        dice_weight=config['loss']['dice_weight'],
-        hv_weight=config['loss']['hv_weight'],
-        hv_mse_weight=config['loss']['hv_mse_weight'],
-        hv_msge_weight=config['loss']['hv_msge_weight']
-    )
+    criterion = get_loss_function(num_classes=config['model']['num_cell_classes'], 
+                                  num_tissue_types=config['model']['num_tissue_classes'])
 
     # Set device
     device = torch.device(config['device'] if torch.cuda.is_available() else "cpu")

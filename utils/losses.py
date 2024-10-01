@@ -86,6 +86,5 @@ class MultiTaskLoss(nn.Module):
         
         return torch.cat([dx, dy], dim=1)
 
-# Function to get the loss function
 def get_loss_function(num_classes, num_tissue_types):
     return MultiTaskLoss(num_classes, num_tissue_types)

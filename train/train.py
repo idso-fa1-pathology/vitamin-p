@@ -1,9 +1,8 @@
 import torch
 import torch.optim as optim
 from tqdm import tqdm
-import numpy as np
 
-def train(model, train_loader, val_loader, criterion, num_epochs=10, learning_rate=1e-4, device='cuda'):
+def train_model(model, train_loader, val_loader, criterion, num_epochs=10, learning_rate=1e-4, save_interval=20, device='cuda'):
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
@@ -72,6 +71,11 @@ def train(model, train_loader, val_loader, criterion, num_epochs=10, learning_ra
             print(f"  {k}: {v:.4f}")
 
         scheduler.step(avg_val_loss)
+
+        # Save the model at specified intervals
+        if (epoch + 1) % save_interval == 0:
+            torch.save(model.state_dict(), f"model_epoch_{epoch+1}.pth")
+            print(f"Model saved at epoch {epoch+1}")
 
         # Save the best model
         if avg_val_loss < best_val_loss:

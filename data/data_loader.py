@@ -1,10 +1,11 @@
-import numpy as np
 import os
 import torch
+import numpy as np
+import cv2
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import cv2
-from scipy.ndimage import gaussian_filter, map_coordinates
+from torchvision.transforms import functional as TF
+from scipy.ndimage import gaussian_filter, map_coordinates, distance_transform_edt
 from skimage.segmentation import slic
 from skimage.measure import regionprops
 
@@ -82,6 +83,9 @@ class CellSegmentationDataset(Dataset):
         self.unique_cell_types = np.arange(self.masks[0].shape[-1] - 1)  # Exclude last channel (background)
         self.cell_type_to_idx = {t: i for i, t in enumerate(self.unique_cell_types)}
 
+        print(f"Number of unique cell types: {len(self.unique_cell_types)}")
+        print(f"Shape of first mask: {self.masks[0].shape}")
+
     def __len__(self):
         return len(self.images)
 
@@ -154,6 +158,7 @@ class CellSegmentationDataset(Dataset):
 
         hv_map = np.stack([h_map, v_map], axis=-1)
         return hv_map
+
 
     def apply_augmentation(self, image, binary_mask, multi_class_mask, hv_map):
         # Convert numpy arrays to tensors
@@ -258,7 +263,72 @@ class CellSegmentationDataset(Dataset):
 
         return image, binary_mask, multi_class_mask, hv_map
 
-# Usage example
+    def elastic_transform(self, image, alpha=1, sigma=0.1, alpha_affine=0.1, is_mask=False):
+        """Elastic deformation of images as described in [Simard2003]_."""
+        random_state = np.random.RandomState(None)
+
+        if image.ndim == 2:
+            shape = image.shape
+        elif image.ndim == 3:
+            shape = image.shape[:2]
+        else:
+            raise ValueError("Image must be 2D or 3D")
+
+        # Random affine
+        center_square = np.float32(shape) // 2
+        square_size = min(shape) // 3
+        pts1 = np.float32([center_square + square_size, [center_square[0]+square_size, center_square[1]-square_size], center_square - square_size])
+        pts2 = pts1 + random_state.uniform(-alpha_affine, alpha_affine, size=pts1.shape).astype(np.float32)
+        M = cv2.getAffineTransform(pts1, pts2)
+
+        if is_mask:
+            if image.ndim == 2:
+                image = cv2.warpAffine(image, M, shape[::-1], borderMode=cv2.BORDER_CONSTANT, flags=cv2.INTER_NEAREST)
+            else:
+                image = np.stack([cv2.warpAffine(image[:,:,i], M, shape[::-1], borderMode=cv2.BORDER_CONSTANT, flags=cv2.INTER_NEAREST) for i in range(image.shape[2])], axis=2)
+        else:
+            if image.ndim == 2:
+                image = cv2.warpAffine(image, M, shape[::-1], borderMode=cv2.BORDER_REFLECT_101)
+            else:
+                image = np.stack([cv2.warpAffine(image[:,:,i], M, shape[::-1], borderMode=cv2.BORDER_REFLECT_101) for i in range(image.shape[2])], axis=2)
+
+        dx = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma) * alpha
+        dy = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma) * alpha
+
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        indices = np.reshape(y+dy, (-1, 1)), np.reshape(x+dx, (-1, 1))
+
+        if is_mask:
+            if image.ndim == 2:
+                return map_coordinates(image, indices, order=0, mode='constant').reshape(shape)
+            else:
+                return np.stack([map_coordinates(image[:,:,i], indices, order=0, mode='constant').reshape(shape) for i in range(image.shape[2])], axis=2)
+        else:
+            if image.ndim == 2:
+                return map_coordinates(image, indices, order=1, mode='reflect').reshape(shape)
+            else:
+                return np.stack([map_coordinates(image[:,:,i], indices, order=1, mode='reflect').reshape(shape) for i in range(image.shape[2])], axis=2)
+
+    def apply_slic(self, image):
+        image_np = image.numpy().transpose(1, 2, 0)
+        segments = slic(image_np, n_segments=100, compactness=10, sigma=1)
+        out = np.zeros_like(image_np)
+        for i in np.unique(segments):
+            mask = segments == i
+            out[mask] = np.mean(image_np[mask], axis=0)
+        return torch.from_numpy(out.transpose(2, 0, 1))
+
+    def zoom_blur(self, image, max_factor=1.2):
+        c, h, w = image.shape
+        zoom_factor = torch.FloatTensor(1).uniform_(1, max_factor).item()
+        zh = int(np.round(h * zoom_factor))
+        zw = int(np.round(w * zoom_factor))
+        zoom_image = TF.resize(image, (zh, zw))
+        zoom_image = TF.center_crop(zoom_image, (h, w))
+        return (image + zoom_image) / 2
+
+
+
 def get_data_loaders(base_path, batch_size=16):
     all_images, all_masks, all_types = load_all_folds(base_path)
     data_splits = create_train_val_test_split(all_images, all_masks, all_types)
@@ -307,3 +377,5 @@ def get_data_loaders(base_path, batch_size=16):
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     return train_loader, val_loader, test_loader
+
+# The rest of your data_loader.py code remains the same

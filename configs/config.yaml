@@ -1,11 +1,13 @@
 # Data configuration
 data:
-  path: '/rsrch5/home/plm/yshokrollahi/project4/models/mesmer/tissuenet_v1.1'
+  path: '/rsrch5/home/plm/yshokrollahi/vitamin-p/vitamin-p/data/raw/H&E'
   batch_size: 16
 
 # Model configuration
 model:
   name: 'ModifiedCellSwin'
+  num_cell_classes: 5
+  num_tissue_classes: 19
 
 # Training configuration
 training:

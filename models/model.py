@@ -44,15 +44,13 @@ class SwinEncoder(nn.Module):
         else:
             weights = None
         self.swin = swin_t(weights=weights)
-        self.swin.head = nn.Identity()
-        
-        self.swin.features[0][0] = nn.Conv2d(2, 96, kernel_size=(4, 4), stride=(4, 4))
+        self.swin.head = nn.Identity()  # Remove the classifier head
 
     def forward(self, x):
         features = []
         for i, layer in enumerate(self.swin.features):
             x = layer(x)
-            if i in [2, 4, 6]:
+            if i in [2, 4, 6]:  # Collect features from specific layers
                 features.append(x)
         return features
 
@@ -82,77 +80,109 @@ class AttentionBlock(nn.Module):
         return x * psi
 
 class MultiHeadDecoder(nn.Module):
-    def __init__(self):
+    def __init__(self, num_cell_classes, num_tissue_classes):
         super().__init__()
         self.decoder1 = DecoderBlock(768, 384)
         self.decoder2 = DecoderBlock(384 + 384, 192)
         self.decoder3 = DecoderBlock(192 + 192, 96)
         self.decoder4 = DecoderBlock(96 + 192, 48)
         
+        # Binary cell segmentation (all cells)
         self.cell_seg_conv = nn.Conv2d(48, 1, kernel_size=1)
-        self.nuclear_seg_conv = nn.Conv2d(48, 1, kernel_size=1)
-        self.cell_hv_conv = nn.Conv2d(48, 2, kernel_size=1)
-        self.nuclei_hv_conv = nn.Conv2d(48, 2, kernel_size=1)
+        
+        # Cell type classification
+        self.cell_class_conv = nn.Conv2d(48, num_cell_classes, kernel_size=1)
+        
+        # Tissue classification branch
+        self.tc_pool = nn.AdaptiveAvgPool2d(1)
+        self.tc_fc = nn.Sequential(
+            nn.Linear(768, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_tissue_classes)
+        )
+        
+        # Global cell classification
+        self.global_cell_pool = nn.AdaptiveMaxPool2d(1)
+        self.global_cell_fc = nn.Sequential(
+            nn.Linear(768, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_cell_classes)
+        )
+        
+        # HV branch
+        self.hv_conv = nn.Conv2d(48, 2, kernel_size=1)  # 2 channels for horizontal and vertical maps
         
         self.attention1 = AttentionBlock(F_g=384, F_l=384, F_int=192)
         self.attention2 = AttentionBlock(F_g=192, F_l=192, F_int=96)
         self.attention3 = AttentionBlock(F_g=96, F_l=192, F_int=48)
 
     def forward(self, features):
-        x = features[-1].permute(0, 3, 1, 2)
+        x = features[-1]
+        x = x.permute(0, 3, 1, 2)  # Change from [B, H, W, C] to [B, C, H, W]
         x = self.decoder1(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         
-        skip1 = features[-2].permute(0, 3, 1, 2)
-        skip1 = F.interpolate(skip1, size=x.shape[2:], mode='bilinear', align_corners=False)
+        skip1 = F.interpolate(features[-2].permute(0, 3, 1, 2), size=x.shape[2:], mode='bilinear', align_corners=False)
         x = torch.cat([x, self.attention1(x, skip1)], dim=1)
         x = self.decoder2(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         
-        skip2 = features[-3].permute(0, 3, 1, 2)
-        skip2 = F.interpolate(skip2, size=x.shape[2:], mode='bilinear', align_corners=False)
+        skip2 = F.interpolate(features[-3].permute(0, 3, 1, 2), size=x.shape[2:], mode='bilinear', align_corners=False)
         x = torch.cat([x, self.attention2(x, skip2)], dim=1)
         x = self.decoder3(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         
-        skip3 = features[0].permute(0, 3, 1, 2)
-        skip3 = F.interpolate(skip3, size=x.shape[2:], mode='bilinear', align_corners=False)
+        skip3 = F.interpolate(features[0].permute(0, 3, 1, 2), size=x.shape[2:], mode='bilinear', align_corners=False)
         x = torch.cat([x, self.attention3(x, skip3)], dim=1)
         x = self.decoder4(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         
-        # Cell segmentation
+        # Binary cell segmentation (all cells)
         cell_seg_out = self.cell_seg_conv(x)
         cell_seg_out = F.interpolate(cell_seg_out, scale_factor=2, mode='bilinear', align_corners=False)
         
-        # Nuclear segmentation
-        nuclear_seg_out = self.nuclear_seg_conv(x)
-        nuclear_seg_out = F.interpolate(nuclear_seg_out, scale_factor=2, mode='bilinear', align_corners=False)
+        # Cell type classification
+        cell_class_out = self.cell_class_conv(x)
+        cell_class_out = F.interpolate(cell_class_out, scale_factor=2, mode='bilinear', align_corners=False)
         
-        # HV map for cells
-        cell_hv_out = self.cell_hv_conv(x)
-        cell_hv_out = F.interpolate(cell_hv_out, scale_factor=2, mode='bilinear', align_corners=False)
+        # Tissue classification (tc)
+        tc_out = self.tc_pool(features[-1].permute(0, 3, 1, 2))
+        tc_out = tc_out.view(tc_out.size(0), -1)
+        tc_out = self.tc_fc(tc_out)
         
-        # HV map for nuclei
-        nuclei_hv_out = self.nuclei_hv_conv(x)
-        nuclei_hv_out = F.interpolate(nuclei_hv_out, scale_factor=2, mode='bilinear', align_corners=False)
+        # Global cell classification
+        global_cell_features = self.global_cell_pool(features[-1].permute(0, 3, 1, 2))
+        global_cell_features = global_cell_features.view(global_cell_features.size(0), -1)
+        global_cell_out = self.global_cell_fc(global_cell_features)
         
-        return cell_seg_out, nuclear_seg_out, cell_hv_out, nuclei_hv_out
+        # HV distance maps
+        hv_out = self.hv_conv(x)
+        hv_out = F.interpolate(hv_out, scale_factor=2, mode='bilinear', align_corners=False)
+        
+        return cell_seg_out, cell_class_out, tc_out, global_cell_out, hv_out
 
 class ModifiedCellSwin(nn.Module):
-    def __init__(self):
+    def __init__(self, num_cell_classes, num_tissue_classes, seg_threshold=0.5):
         super().__init__()
         self.encoder = SwinEncoder()
-        self.decoder = MultiHeadDecoder()
+        self.decoder = MultiHeadDecoder(num_cell_classes, num_tissue_classes)
+        self.seg_threshold = seg_threshold
 
     def forward(self, x):
         features = self.encoder(x)
-        cell_seg_out, nuclear_seg_out, cell_hv_out, nuclei_hv_out = self.decoder(features)
+        cell_seg_out, cell_class_out, tc_out, global_cell_out, hv_out = self.decoder(features)
         
-        return cell_seg_out, nuclear_seg_out, cell_hv_out, nuclei_hv_out
+        # Apply binary segmentation mask to cell classification
+        cell_seg_mask = (torch.sigmoid(cell_seg_out) > self.seg_threshold).float()
+        cell_class_out_masked = cell_class_out * cell_seg_mask
+        
+        return cell_seg_out, cell_class_out_masked, tc_out, global_cell_out, hv_out
 
-    def _debug_check_nan_inf(self, tensor, name):
-        if torch.isnan(tensor).any():
-            print(f"NaN detected in {name}")
-        if torch.isinf(tensor).any():
-            print(f"Inf detected in {name}")
+# Function to initialize the model
+def get_model(num_cell_classes, num_tissue_classes):
+    return ModifiedCellSwin(num_cell_classes, num_tissue_classes).float()

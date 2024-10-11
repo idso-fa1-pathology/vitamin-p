@@ -1,50 +1,56 @@
+
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: yshokrollahi-vitamin-p-mif
+  name: yshokrollahi-pannuke-cellvit-sam-h
   namespace: yn-gpu-workload
   labels:
     k8s-user: yshokrollahi
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 600
+  ttlSecondsAfterFinished: 60
   template:
     spec:
       nodeSelector:
         "nvidia.com/gpu.present": "true"
+        "nvidia.com/gpu.machine": "DGXH100"
       securityContext:
         runAsUser: 297724
-        runAsGroup: 900027
-        fsGroup: 900027
+        runAsGroup: 1944303352
+        fsGroup: 1944303352
+        supplementalGroups:
+          - 1944271327
+          - 900027
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: '21474836480' 
+        - name: ifp
+          persistentVolumeClaim:
+            claimName: yshokrollahi-gpu-ifp
+        - name: home
+          persistentVolumeClaim:
+            claimName: yshokrollahi-gpu-home
+        - name: lab
+          persistentVolumeClaim:
+            claimName: yshokrollahi-gpu-lab    
       containers:
         - name: main
           image: hpcharbor.mdanderson.edu/yshokrollahi/cellvit@sha256:0b9813cd0c39eb4f8e2f5293a29f47379eb9c0f850540c39ed8f7cdd0129dcaf
-          command: ["/usr/bin/python3", "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF/main.py"]
-          workingDir: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
-          env:
-            - name: HOME
-              value: "/rsrch5/home/plm/yshokrollahi/"
-            - name: CODE_DIR
-              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
-            - name: DATA_DIR
-              value: "/rsrch5/home/plm/yshokrollahi/data/tissuenet_v1.1"
-            - name: PYTHONPATH
-              value: "/rsrch5/home/plm/yshokrollahi/vitamin-p-mIF"
+          command: ["/usr/bin/python3", "/rsrch5/home/plm/yshokrollahi/CellViT/cell_segmentation/run_cellvit.py"]
+          args: ["--config", "/rsrch5/home/plm/yshokrollahi/CellViT/configs/examples/cell_segmentation/pannuke-cellvit-sam-h.yaml"]
           volumeMounts:
             - name: shm
               mountPath: "/dev/shm"
+            - name: ifp
+              mountPath: "/rsrch5/home/plm/idso_fa1_pathology"
             - name: home
-              mountPath: "/rsrch5/home/plm/yshokrollahi/"
+              mountPath: "/rsrch5/home/plm/yshokrollahi"
+            - name: lab
+              mountPath: "/rsrch6/home/trans_mol_path/yuan_lab"  
           resources:
             limits:
               nvidia.com/gpu: "1"
           imagePullPolicy: IfNotPresent
       restartPolicy: Never
-      volumes:
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: '21474836480'
-        - name: home
-          persistentVolumeClaim:
-            claimName: yshokrollahi-gpu-home

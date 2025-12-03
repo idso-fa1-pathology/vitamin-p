@@ -1,0 +1,189 @@
+# ============================================================================
+# CRC Dataset Configuration File
+# Edit these settings based on your needs
+# ============================================================================
+
+# ============================================================================
+# DATA PATHS
+# ============================================================================
+data:
+  zarr_base: "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/ORION-CRC/zarr_data"
+  cache_dir: "./cache"  # Relative to notebook directory
+  cache_filename: "crc_dataset_cache.pkl"
+
+# ============================================================================
+# SAMPLE SPLITS
+# ============================================================================
+splits:
+  # Define your train/val/test splits manually (optional)
+  # If not specified, will auto-split based on ratios below
+  train_samples: null
+  val_samples: null
+  test_samples: null
+  
+  # Auto-split ratios (used if samples not specified above)
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+  
+  # All available samples
+  all_samples:
+    - CRC01
+    - CRC02
+    - CRC03
+    - CRC04
+    - CRC05
+    - CRC06
+    - CRC07
+    - CRC08
+    - CRC09
+    - CRC10
+    - CRC11
+    - CRC12
+    - CRC13
+    - CRC14
+    - CRC15
+    - CRC16
+    - CRC17
+    - CRC18
+    - CRC19
+    - CRC20
+    - CRC21
+    - CRC22
+    - CRC23
+    - CRC24
+    - CRC25
+    - CRC26
+    - CRC27
+    - CRC28
+    - CRC29
+    - CRC30
+    - CRC31
+    - CRC32
+    - CRC33_01
+    - CRC33_02
+    - CRC34
+    - CRC35
+    - CRC36
+    - CRC37
+    - CRC38
+    - CRC39
+    - CRC40
+
+# ============================================================================
+# DATALOADER SETTINGS
+# ============================================================================
+dataloader:
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  shuffle_train: true
+
+# ============================================================================
+# DATA PROCESSING
+# ============================================================================
+processing:
+  normalize: true
+  normalize_method: "minmax"  # "minmax" or "zscore"
+  
+  # Image normalization values (uint16 max)
+  he_max_value: 255.0
+  mif_max_value: 65535.0
+
+# ============================================================================
+# AUGMENTATION SETTINGS
+# ============================================================================
+augmentation:
+  # Enable/disable augmentation
+  train_augment: true
+  val_augment: false
+  test_augment: false
+  
+  # Overall augmentation probability
+  augment_prob: 0.5
+  
+  # Geometric augmentations
+  geometric:
+    flip_prob: 0.6
+    rotation_prob: 0.6
+    rotation_angles: [90, 180, 270]
+    scale_prob: 0.25
+    scale_range: [0.95, 1.05]
+  
+  # Photometric augmentations (H&E only)
+  photometric:
+    brightness_prob: 0.5
+    brightness_factor: 0.25
+    contrast_prob: 0.5
+    contrast_factor: 0.25
+  
+  # Stain augmentation (H&E only)
+  stain:
+    stain_prob: 0.5
+    hue_shift_range: [-0.05, 0.05]
+    saturation_range: [0.85, 1.15]
+  
+  # Noise and blur
+  noise_blur:
+    blur_prob: 0.4
+    blur_sigma_range: [0.1, 1.0]
+    noise_prob: 0.3
+    noise_he_std_range: [0.01, 0.05]
+    noise_mif_std_range: [0.005, 0.02]
+  
+  # Cutout augmentation
+  cutout:
+    cutout_prob: 0.3
+    cutout_size_range: [8, 32]
+
+# ============================================================================
+# HV MAP GENERATION
+# ============================================================================
+hv_maps:
+  generate: true
+  method: "pannuke"  # "pannuke" (recommended) or "simple"
+  
+  # Generate HV maps for all mask types
+  he_nuclei: true
+  he_cells: true
+  mif_nuclei: true
+  mif_cells: true
+
+# ============================================================================
+# FILTERING
+# ============================================================================
+filtering:
+  min_instances_per_tile: 0
+  filter_empty_masks: true
+  
+  # Per-mask type filtering (optional)
+  min_he_nuclei: 0
+  min_he_cells: 0
+  min_mif_nuclei: 0
+  min_mif_cells: 0
+
+# ============================================================================
+# MEMORY & CACHING
+# ============================================================================
+memory:
+  use_cache: false
+  force_regenerate_cache: false
+  
+  # Memory strategy
+  strategy: "memory"  # "memory" (preload all) or "lazy" (load on demand)
+  max_memory_gb: 32.0
+  
+  # Lazy loading settings
+  chunk_size: 1000
+
+# ============================================================================
+# DEBUGGING
+# ============================================================================
+debug:
+  verbose: true
+  max_samples: null
+  print_data_stats: true
+  validate_data: true

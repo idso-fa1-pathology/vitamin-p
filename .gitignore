@@ -4,10 +4,12 @@
 .vscode/
 #Cache folder
 .alcache/
+cache/
 #Symbols folder
 .alpackages/
 #Snapshots folder
 .snapshots/
+checkpoints/
 #Testing Output folder
 .output/
 #Extension App-file

@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: yshokrollahi-vitamin-p-mif
+  name: yshokrollahi-vitamin-p
   namespace: yn-gpu-workload
   labels:
     k8s-user: yshokrollahi

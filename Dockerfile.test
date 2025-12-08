@@ -1,0 +1,18 @@
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu20.04
+
+# Set web proxy
+ENV http_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+ENV https_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+ENV HTTP_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
+ENV HTTPS_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install curl and wget
+RUN apt-get update && apt-get install -y curl wget ca-certificates
+
+# Test 1: curl with explicit proxy
+RUN echo "=== Test 1: curl with -x proxy ===" && \
+    curl -x http://1mcwebproxy01.mdanderson.edu:3128 -LO http://repo.continuum.io/miniconda/Miniconda3-py311_23.10.0-1-Linux-x86_64.sh && \
+    ls -lh Miniconda3-py311_23.10.0-1-Linux-x86_64.sh && \
+    echo "SUCCESS: curl with -x proxy" || echo "FAILED: curl with -x proxy"
+

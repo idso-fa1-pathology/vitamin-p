@@ -1,0 +1,35 @@
+# Core Deep Learning
+torch==2.1.2
+torchvision==0.16.2
+
+# Computer Vision & Image Processing
+opencv-python==4.8.0.74
+scikit-image==0.22.0
+Pillow
+
+# Data Processing
+numpy==1.26.2
+pandas==2.1.2
+geopandas==0.14.2
+
+# Machine Learning
+scikit-learn==1.3.2
+
+# Visualization
+matplotlib==3.7.2
+
+# Progress Bars
+tqdm==4.64.0
+
+# Configuration
+PyYAML
+
+# CLIP (for your clip-anytorch)
+clip-anytorch==2.6.0
+
+# Zarr support (since you mentioned zarr<3)
+zarr<3
+
+# Additional useful packages for deep learning
+albumentations
+tensorboard

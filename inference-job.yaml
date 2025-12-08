@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yshokrollahi-vitamin-p-inference
+  namespace: yn-gpu-workload
+  labels:
+    k8s-user: yshokrollahi
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      securityContext:
+        runAsUser: 297724
+        runAsGroup: 1944303352
+        fsGroup: 1944303352
+        supplementalGroups:
+          - 1944271327
+          - 900027
+      containers:
+      - name: main
+        image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
+        command: 
+        - python
+        - /workspace/inference.py
+        - --wsi_path
+        - /rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/CellVitPlusPlus/ORION-CRC/CRC36/19510_C36_US_SCAN_OR_001__161442-registered.ome.tif
+        - --wsi_name
+        - CRC36_inference
+        - --model_path
+        - /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p/checkpoints/best_dual_encoder_model.pth
+        - --chunk_size
+        - "10000"
+        - --chunk_overlap
+        - "512"
+        - --modality
+        - he
+        - --targets
+        - nuclei
+        - cell
+        workingDir: /workspace
+        env:
+        - name: HOME
+          value: /tmp
+        - name: PYTHONPATH
+          value: /workspace
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: program
+          mountPath: /rsrch9/home/plm/idso_fa1_pathology
+        - name: outputs
+          mountPath: /workspace/outputs
+          subPath: codes/yshokrollahi/vitamin-p/outputs
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: 64Gi
+            cpu: "16"
+          requests:
+            nvidia.com/gpu: 1
+            memory: 32Gi
+            cpu: "8"
+        imagePullPolicy: Always
+      restartPolicy: Never
+      volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 21474836480
+      - name: program
+        persistentVolumeClaim:
+          claimName: yshokrollahi-gpu-rsrch9-home-plm
+      - name: outputs
+        persistentVolumeClaim:
+          claimName: yshokrollahi-gpu-rsrch9-home-plm

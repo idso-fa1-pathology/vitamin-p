@@ -12,6 +12,7 @@ spec:
     spec:
       nodeSelector:
         nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
       securityContext:
         runAsUser: 297724
         runAsGroup: 1944303352
@@ -36,6 +37,10 @@ spec:
           mountPath: /dev/shm
         - name: program
           mountPath: /rsrch9/home/plm/idso_fa1_pathology
+        - name: checkpoints
+          mountPath: /workspace/checkpoints
+        - name: cache
+          mountPath: /workspace/cache
         resources:
           limits:
             nvidia.com/gpu: 1
@@ -55,3 +60,11 @@ spec:
       - name: program
         persistentVolumeClaim:
           claimName: yshokrollahi-gpu-rsrch9-home-plm
+      - name: checkpoints
+        persistentVolumeClaim:
+          claimName: yshokrollahi-gpu-rsrch9-home-plm
+          subPath: codes/yshokrollahi/vitamin-p/checkpoints
+      - name: cache
+        persistentVolumeClaim:
+          claimName: yshokrollahi-gpu-rsrch9-home-plm
+          subPath: codes/yshokrollahi/vitamin-p/cache

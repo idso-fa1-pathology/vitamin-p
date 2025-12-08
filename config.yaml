@@ -169,7 +169,7 @@ filtering:
 # MEMORY & CACHING
 # ============================================================================
 memory:
-  use_cache: true
+  use_cache: false
   force_regenerate_cache: false
   
   # Memory strategy

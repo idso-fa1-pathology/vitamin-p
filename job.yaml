@@ -1,3 +1,4 @@
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -12,7 +13,6 @@ spec:
     spec:
       nodeSelector:
         nvidia.com/gpu.present: "true"
-        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
       securityContext:
         runAsUser: 297724
         runAsGroup: 1944303352
@@ -20,51 +20,39 @@ spec:
         supplementalGroups:
           - 1944271327
           - 900027
-      containers:
-      - name: main
-        image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
-        command: ["python", "/workspace/main.py"]
-        workingDir: /workspace
-        env:
-        - name: HOME
-          value: /tmp
-        - name: PYTHONPATH
-          value: /workspace
-        - name: CUDA_VISIBLE_DEVICES
-          value: "0"
-        volumeMounts:
-        - name: shm
-          mountPath: /dev/shm
-        - name: program
-          mountPath: /rsrch9/home/plm/idso_fa1_pathology
-        - name: checkpoints
-          mountPath: /workspace/checkpoints
-        - name: cache
-          mountPath: /workspace/cache
-        resources:
-          limits:
-            nvidia.com/gpu: 1
-            memory: 32Gi
-            cpu: "16"
-          requests:
-            nvidia.com/gpu: 1
-            memory: 16Gi
-            cpu: "8"
-        imagePullPolicy: Always
-      restartPolicy: Never
       volumes:
-      - name: shm
-        emptyDir:
-          medium: Memory
-          sizeLimit: 21474836480
-      - name: program
-        persistentVolumeClaim:
-          claimName: yshokrollahi-gpu-rsrch9-home-plm
-      - name: checkpoints
-        persistentVolumeClaim:
-          claimName: yshokrollahi-gpu-rsrch9-home-plm
-          subPath: codes/yshokrollahi/vitamin-p/checkpoints
-      - name: cache
-        persistentVolumeClaim:
-          claimName: yshokrollahi-gpu-rsrch9-home-plm
-          subPath: codes/yshokrollahi/vitamin-p/cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: '21Gi'
+        - name: program
+          persistentVolumeClaim:
+            claimName: yshokrollahi-gpu-rsrch9-home-plm
+      containers:
+        - name: main
+          image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
+          command: ["python", "/rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p/main.py"]
+          workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PYTHONPATH
+              value: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+          volumeMounts:
+            - name: shm
+              mountPath: "/dev/shm"
+            - name: program
+              mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "16"
+              memory: "32Gi"
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "16"
+              memory: "32Gi"
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Never

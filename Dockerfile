@@ -66,7 +66,9 @@ RUN pip install --no-cache-dir \
     openslide-python==1.3.1 \
     Pillow==10.0.0 \
     opencv-python==4.8.0.74 \
-    scikit-image==0.21.0
+    scikit-image==0.21.0 \
+    tifffile==2023.7.10 \
+    imagecodecs==2023.3.16
 
 # Install data science packages (adjusted versions for Python 3.8)
 RUN pip install --no-cache-dir \
@@ -75,7 +77,8 @@ RUN pip install --no-cache-dir \
     matplotlib==3.7.2 \
     seaborn==0.13.0 \
     scikit-learn==1.3.2 \
-    geopandas==0.13.2
+    geopandas==0.13.2 \
+    scipy==1.10.1
 
 # Install PyTorch with CUDA 12.1 support
 RUN pip install --no-cache-dir \
@@ -108,12 +111,14 @@ COPY crc_dataset/ /workspace/crc_dataset/
 COPY metrics/ /workspace/metrics/
 COPY models/ /workspace/models/
 COPY postprocessing/ /workspace/postprocessing/
+COPY inference/ /workspace/inference/
 COPY main.py /workspace/
+COPY inference.py /workspace/
 COPY config.yaml /workspace/
 COPY README.md /workspace/
 
 # Create necessary directories for vitamin-p
-RUN mkdir -p /workspace/checkpoints /workspace/cache /workspace/metrics && \
+RUN mkdir -p /workspace/checkpoints /workspace/cache /workspace/metrics /workspace/outputs && \
     chmod -R 777 /workspace
 
 # Set Python path

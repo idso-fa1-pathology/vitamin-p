@@ -7,7 +7,142 @@ from matplotlib import cm
 from typing import Tuple, Optional
 import cv2
 
+import numpy as np
+import matplotlib.pyplot as plt
+import tifffile
+import cv2
+from pathlib import Path
+from glob import glob
 
+# Configuration
+base_dir = '/rsrch9/home/plm/idso_fa1_pathology/TIER1/yasin-vitaminp/Xenium_public/5k'
+output_dir = Path('./wsi_patches_output')
+output_dir.mkdir(parents=True, exist_ok=True)
+
+chunk_size = 1024
+num_patches_per_tissue = 3  # Patches per tissue type
+min_cell_count = 300  # Minimum cells required
+max_attempts = 50  # Maximum attempts per patch to avoid infinite loops
+
+# Find all OME-TIFF files
+tissue_types = ['breast', 'cervical', 'lung', 'lymph_node', 'ovarian', 'prostate', 'skin']
+wsi_files = []
+
+for tissue in tissue_types:
+    pattern = f"{base_dir}/{tissue}/*_registered.ome.tif"
+    files = glob(pattern)
+    if files:
+        wsi_files.append((tissue, files[0]))
+        print(f"Found {tissue}: {Path(files[0]).name}")
+
+print(f"\n{'='*60}")
+print(f"Found {len(wsi_files)} tissue types to process")
+print('='*60)
+
+# Process each tissue type
+for tissue_name, wsi_path in wsi_files:
+    print(f"\n{'='*60}")
+    print(f"PROCESSING: {tissue_name.upper()}")
+    print('='*60)
+    
+    # Create tissue-specific output directory
+    tissue_output_dir = output_dir / tissue_name
+    tissue_output_dir.mkdir(exist_ok=True)
+    
+    # Load WSI metadata
+    with tifffile.TiffFile(wsi_path) as tif:
+        page = tif.pages[0]
+        wsi_shape = page.shape
+        print(f"WSI shape: {wsi_shape}")
+        
+        max_y = wsi_shape[0] - chunk_size
+        max_x = wsi_shape[1] - chunk_size
+        np.random.seed(hash(tissue_name) % (2**32))  # Reproducible per tissue
+    
+    # Process patches - keep trying until we get num_patches_per_tissue good ones
+    successful_patches = 0
+    attempt = 0
+    
+    while successful_patches < num_patches_per_tissue and attempt < max_attempts * num_patches_per_tissue:
+        attempt += 1
+        
+        # Generate random coordinates
+        start_y = np.random.randint(0, max_y)
+        start_x = np.random.randint(0, max_x)
+        
+        print(f"\n  Attempt {attempt} (Patch {successful_patches+1}/{num_patches_per_tissue}) at ({start_y}, {start_x})")
+        
+        # Load patch
+        with tifffile.TiffFile(wsi_path) as tif:
+            wsi_array = tif.pages[0].asarray()[start_y:start_y+chunk_size, start_x:start_x+chunk_size]
+            
+            # Ensure RGB uint8
+            if wsi_array.ndim == 2:
+                wsi_array = np.stack([wsi_array] * 3, axis=-1)
+            elif wsi_array.shape[-1] > 3:
+                wsi_array = wsi_array[..., :3]
+            if wsi_array.dtype != np.uint8:
+                wsi_array = (wsi_array * 255).astype(np.uint8) if wsi_array.max() <= 1 else wsi_array.astype(np.uint8)
+        
+        # Run inference
+        results_nuclei = wsi_inference.process_wsi(wsi_array, f"{tissue_name}_patch_{successful_patches+1}_nuclei", "he", "nuclei")
+        results_cells = wsi_inference.process_wsi(wsi_array, f"{tissue_name}_patch_{successful_patches+1}_cells", "he", "cell")
+        
+        num_cells = results_cells['num_cells']
+        num_nuclei = results_nuclei['num_cells']
+        
+        print(f"  Nuclei: {num_nuclei}, Cells: {num_cells}")
+        
+        # Check if this patch meets our criteria
+        if num_cells < min_cell_count:
+            print(f"  ❌ Skipping: Only {num_cells} cells (need ≥{min_cell_count})")
+            continue
+        
+        # This patch is good! Save it
+        successful_patches += 1
+        print(f"  ✅ Accepted: {num_cells} cells (≥{min_cell_count})")
+        
+        # Create overlay visualization
+        vis = wsi_array.copy()
+        
+        # Draw cells (blue)
+        for cell in results_cells['cells']:
+            contour = np.array(cell['contour'], dtype=np.int32)
+            if contour.shape[0] >= 3:
+                cv2.drawContours(vis, [contour], -1, (0, 0, 255), 2)
+        
+        # Draw nuclei (green)
+        for cell in results_nuclei['cells']:
+            contour = np.array(cell['contour'], dtype=np.int32)
+            if contour.shape[0] >= 3:
+                cv2.drawContours(vis, [contour], -1, (0, 255, 0), 1)
+            cv2.circle(vis, centroid, 2, (255, 0, 0), -1)
+        
+        # Save figure
+        fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+        axes[0].imshow(wsi_array)
+        axes[0].set_title(f'{tissue_name.title()} - Patch {successful_patches}', fontsize=12, fontweight='bold')
+        axes[0].axis('off')
+        
+        axes[1].imshow(vis)
+        axes[1].set_title(f'Cells: {num_cells} (Blue) | Nuclei: {num_nuclei} (Green)', 
+                         fontsize=12, fontweight='bold')
+        axes[1].axis('off')
+        
+        plt.tight_layout()
+        save_path = tissue_output_dir / f'patch_{successful_patches:02d}_y{start_y}_x{start_x}.png'
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  💾 Saved: {save_path}")
+    
+    if successful_patches < num_patches_per_tissue:
+        print(f"\n  ⚠️  WARNING: Only found {successful_patches}/{num_patches_per_tissue} patches with ≥{min_cell_count} cells after {attempt} attempts")
+
+print(f"\n{'='*60}")
+print(f"✅ ALL PROCESSING COMPLETE!")
+print(f"Results saved to: {output_dir}")
+print('='*60)
 def visualize_instance_map(
     instance_map: np.ndarray,
     image: Optional[np.ndarray] = None,

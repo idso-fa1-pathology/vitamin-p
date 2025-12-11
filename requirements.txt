@@ -33,3 +33,11 @@ zarr<3
 # Additional useful packages for deep learning
 albumentations
 tensorboard
+
+# Existing packages (keep all your current packages)
+# ...
+
+# New packages for ViT backbones
+timm>=0.9.0
+einops>=0.7.0
+pyyaml>=6.0

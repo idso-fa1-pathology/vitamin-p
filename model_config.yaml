@@ -1,0 +1,327 @@
+# ============================================================================
+# Model Configuration File
+# Use this to quickly switch between different model architectures
+# ============================================================================
+
+# ============================================================================
+# EXPERIMENT CONFIGS
+# ============================================================================
+
+# Default configuration
+default:
+  model_type: "dual_encoder"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# DUAL-ENCODER MODELS (H&E + MIF)
+# ============================================================================
+
+# ResNet experiments
+resnet_baseline:
+  model_type: "dual_encoder"
+  backbone: "resnet34"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+resnet_strong:
+  model_type: "dual_encoder"
+  backbone: "resnet101"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# DINOv2 experiments (RECOMMENDED FOR CELLS)
+dinov2_small:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vits14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+dinov2_base:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+dinov2_large:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitl14"
+  pretrained: true
+  dropout_rate: 0.35
+  version: "v2"
+
+dinov2_giant:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitg14"
+  pretrained: true
+  dropout_rate: 0.35
+  version: "v2"
+
+# ConvNeXt experiments
+convnext_fast:
+  model_type: "dual_encoder"
+  backbone: "convnext_tiny"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+convnext_balanced:
+  model_type: "dual_encoder"
+  backbone: "convnext_small"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+convnext_strong:
+  model_type: "dual_encoder"
+  backbone: "convnext_base"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# HE-ONLY MODELS (Single Modality Ablations)
+# ============================================================================
+
+# HE-only with ResNet
+he_only_resnet34:
+  model_type: "he_only"
+  backbone: "resnet34"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_resnet50:
+  model_type: "he_only"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_resnet101:
+  model_type: "he_only"
+  backbone: "resnet101"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# HE-only with DINOv2
+he_only_dinov2_small:
+  model_type: "he_only"
+  backbone: "dinov2_vits14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_dinov2:
+  model_type: "he_only"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_dinov2_large:
+  model_type: "he_only"
+  backbone: "dinov2_vitl14"
+  pretrained: true
+  dropout_rate: 0.35
+  version: "v2"
+
+# HE-only with ConvNeXt
+he_only_convnext_tiny:
+  model_type: "he_only"
+  backbone: "convnext_tiny"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_convnext_small:
+  model_type: "he_only"
+  backbone: "convnext_small"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+he_only_convnext_base:
+  model_type: "he_only"
+  backbone: "convnext_base"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# MIF-ONLY MODELS (Single Modality Ablations)
+# ============================================================================
+
+# MIF-only with ResNet
+mif_only_resnet34:
+  model_type: "mif_only"
+  backbone: "resnet34"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_resnet50:
+  model_type: "mif_only"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_resnet101:
+  model_type: "mif_only"
+  backbone: "resnet101"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# MIF-only with DINOv2
+mif_only_dinov2_small:
+  model_type: "mif_only"
+  backbone: "dinov2_vits14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_dinov2:
+  model_type: "mif_only"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_dinov2_large:
+  model_type: "mif_only"
+  backbone: "dinov2_vitl14"
+  pretrained: true
+  dropout_rate: 0.35
+  version: "v2"
+
+# MIF-only with ConvNeXt
+mif_only_convnext_tiny:
+  model_type: "mif_only"
+  backbone: "convnext_tiny"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_convnext_small:
+  model_type: "mif_only"
+  backbone: "convnext_small"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+mif_only_convnext_base:
+  model_type: "mif_only"
+  backbone: "convnext_base"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# RECOMMENDED CONFIGURATIONS
+# ============================================================================
+
+# For fastest training/inference
+fast:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vits14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# For best accuracy (recommended)
+best_accuracy:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# For maximum accuracy (requires large GPU)
+maximum_accuracy:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitl14"
+  pretrained: true
+  dropout_rate: 0.35
+  version: "v2"
+
+# Baseline comparison
+baseline_cnn:
+  model_type: "dual_encoder"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# ABLATION STUDIES
+# ============================================================================
+
+# Compare modalities with same backbone
+ablation_resnet50_dual:
+  model_type: "dual_encoder"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+ablation_resnet50_he:
+  model_type: "he_only"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+ablation_resnet50_mif:
+  model_type: "mif_only"
+  backbone: "resnet50"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+ablation_dinov2_dual:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+ablation_dinov2_he:
+  model_type: "he_only"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+ablation_dinov2_mif:
+  model_type: "mif_only"
+  backbone: "dinov2_vitb14"
+  pretrained: true
+  dropout_rate: 0.3
+  version: "v2"
+
+# ============================================================================
+# NO PRETRAINING EXPERIMENTS
+# ============================================================================
+
+no_pretrain_resnet50:
+  model_type: "dual_encoder"
+  backbone: "resnet50"
+  pretrained: false
+  dropout_rate: 0.3
+  version: "v2"
+
+no_pretrain_dinov2:
+  model_type: "dual_encoder"
+  backbone: "dinov2_vitb14"
+  pretrained: false
+  dropout_rate: 0.3
+  version: "v2"

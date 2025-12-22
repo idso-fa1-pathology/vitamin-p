@@ -1,11 +1,8 @@
----
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: yshokrollahi-vitamin-p
+  name: vitamin-p-flex-large-fold2  # Change this for each job
   namespace: yn-gpu-workload
-  labels:
-    k8s-user: yshokrollahi
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 600
@@ -13,33 +10,46 @@ spec:
     spec:
       nodeSelector:
         nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
       securityContext:
         runAsUser: 297724
         runAsGroup: 1944303352
         fsGroup: 1944303352
-        supplementalGroups:
-          - 1944271327
-          - 900027
       volumes:
         - name: shm
           emptyDir:
             medium: Memory
-            sizeLimit: '21Gi'
+            sizeLimit: '1000Gi'
         - name: program
           persistentVolumeClaim:
             claimName: yshokrollahi-gpu-rsrch9-home-plm
       containers:
-        - name: main
+        - name: training-container
           image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
-          command: ["python", "/rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p/main.py"]
+          # NOW YOU JUST CHANGE THE ARGUMENTS! 🎉
+          command: 
+            - "python"
+            - "scripts/train.py"
+            - "--model"
+            - "flex"           # Change: flex, dual, he, mif
+            - "--size"
+            - "large"          # Change: small, base, large, giant
+            - "--fold"
+            - "1"              # Change: 1, 2, 3
+            - "--epochs"
+            - "250"
           workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
           env:
+            - name: WANDB_API_KEY
+              value: "979fc21fe6b28c4e4a4503f7e421bfc270a4300c"
+            - name: WANDB_PROJECT
+              value: "vitamin-p"
+            - name: WANDB_MODE
+              value: "online"
             - name: HOME
               value: /tmp
             - name: PYTHONPATH
               value: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0"
           volumeMounts:
             - name: shm
               mountPath: "/dev/shm"
@@ -47,12 +57,7 @@ spec:
               mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
           resources:
             limits:
-              nvidia.com/gpu: "1"
-              cpu: "16"
-              memory: "32Gi"
-            requests:
-              nvidia.com/gpu: "1"
-              cpu: "16"
-              memory: "32Gi"
-          imagePullPolicy: IfNotPresent
+              nvidia.com/gpu: "4"
+              cpu: "60"
+              memory: "700Gi"
       restartPolicy: Never

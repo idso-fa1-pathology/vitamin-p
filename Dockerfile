@@ -86,6 +86,9 @@ RUN pip install --no-cache-dir \
     torchvision==0.16.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
+RUN pip install --no-cache-dir \
+    wandb \
+    timm
 # Install additional ML/DL packages
 RUN pip install --no-cache-dir \
     clip-anytorch==2.6.0 \

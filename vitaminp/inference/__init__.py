@@ -1,15 +1,16 @@
-# -*- coding: utf-8 -*-
-# VitaminP Inference Module
-# Main API for WSI inference with VitaminP models
-
-from vitaminp.inference.predictor import WSIPredictor
-from vitaminp.inference.wsi_handler import WSIHandler
-from vitaminp.inference.utils import load_wsi_metadata
+from .wsi_handler import MultiFormatImageLoader
+from .tile_processor import TileProcessor
+from .utils import ResultExporter, setup_logger
+from .overlap_cleaner import OverlapCleaner
+from .postprocessing import process_model_outputs
+from .predictor import WSIPredictor  # ← Add this
 
 __all__ = [
-    "WSIPredictor",
-    "WSIHandler", 
-    "load_wsi_metadata",
+    'WSIPredictor',
+    'MultiFormatImageLoader',
+    'TileProcessor',
+    'ResultExporter',
+    'OverlapCleaner',
+    'setup_logger',
+    'process_model_outputs',
 ]
-
-__version__ = "0.1.0"

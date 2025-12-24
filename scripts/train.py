@@ -1,6 +1,8 @@
 """
 Training script for Kubernetes job submission
-Usage: python scripts/train.py --model flex --size base --fold 1
+Usage: 
+    python scripts/train.py --model dual --size base --fold 1
+    python scripts/train.py --model flex --size large --fold 2
 """
 
 import argparse
@@ -12,22 +14,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dataset import Config, create_dataloaders
-from vitamin_p import (
-    VitaminPFlex, 
-    VitaminPDual, 
-    VitaminPHEBaseline, 
-    VitaminPMIFBaseline,
-    VitaminPTrainer
-)
+from vitaminp import VitaminPDual, VitaminPFlex, VitaminPTrainer
 
 
 def main():
     parser = argparse.ArgumentParser(description='Train Vitamin-P models')
     
     # Model selection
-    parser.add_argument('--model', type=str, required=True, 
-                       choices=['flex', 'dual', 'he', 'mif'],
-                       help='Model type: flex, dual, he, mif')
+    parser.add_argument('--model', type=str, required=True,
+                       choices=['dual', 'flex'],
+                       help='Model type: dual (Dual-Encoder) or flex (Single-Encoder)')
     
     # Model configuration
     parser.add_argument('--size', type=str, default='base',
@@ -35,7 +31,11 @@ def main():
                        help='Model size')
     
     parser.add_argument('--fold', type=int, required=True,
+                       choices=[1, 2, 3, 4, 5],
                        help='Fold number (1, 2, or 3)')
+    
+    parser.add_argument('--dropout', type=float, default=0.3,
+                       help='Dropout rate (only for dual model)')
     
     # Training configuration
     parser.add_argument('--epochs', type=int, default=250,
@@ -44,8 +44,8 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4,
                        help='Learning rate')
     
-    parser.add_argument('--batch-size', type=int, default=None,
-                       help='Batch size (if None, uses config default)')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                       help='Weight decay')
     
     parser.add_argument('--no-augment', action='store_true',
                        help='Disable augmentations')
@@ -74,74 +74,143 @@ def main():
     
     # Setup
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    print(f"\n{'='*80}")
+    print(f"Vitamin-P Training Setup")
+    print(f"{'='*80}")
+    print(f"Model: VitaminP{args.model.capitalize()}")
+    print(f"Device: {device}")
     print(f"Available GPUs: {torch.cuda.device_count()}")
+    if torch.cuda.is_available():
+        print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    print(f"{'='*80}\n")
     
     # Load config and data
     config_path = f"{args.config_dir}/config_fold{args.fold}.yaml"
-    print(f"\nLoading config: {config_path}")
-    config = Config(config_path)
-    config.print_config()
+    print(f"Loading config: {config_path}")
     
-    train_loader, val_loader, test_loader = create_dataloaders(config)
-    print(f"✅ Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
+    try:
+        config = Config(config_path)
+        config.print_config()
+    except Exception as e:
+        print(f"❌ Error loading config: {e}")
+        sys.exit(1)
+    
+    print("\nLoading dataloaders...")
+    try:
+        train_loader, val_loader, test_loader = create_dataloaders(config)
+        print(f"✅ Data loaded successfully!")
+        print(f"   Train batches: {len(train_loader)}")
+        print(f"   Val batches: {len(val_loader)}")
+        print(f"   Test batches: {len(test_loader)}")
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        sys.exit(1)
     
     # Initialize model
     print(f"\n{'='*80}")
-    print(f"Initializing model: {args.model.upper()} - {args.size.upper()}")
+    print(f"Initializing VitaminP{args.model.capitalize()} Model")
     print(f"{'='*80}")
+    print(f"Model size: {args.size.upper()}")
+    if args.model == 'dual':
+        print(f"Dropout rate: {args.dropout}")
+    print(f"Freeze backbone: {args.freeze_backbone}")
+    print(f"{'='*80}\n")
     
-    if args.model == 'flex':
-        model = VitaminPFlex(
-            model_size=args.size,
-            freeze_backbone=args.freeze_backbone
-        )
-    elif args.model == 'dual':
-        model = VitaminPDual(
-            model_size=args.size,
-            dropout_rate=0.3,
-            freeze_backbone=args.freeze_backbone
-        )
-    elif args.model == 'he':
-        model = VitaminPHEBaseline(
-            model_size=args.size,
-            freeze_backbone=args.freeze_backbone
-        )
-    elif args.model == 'mif':
-        model = VitaminPMIFBaseline(
-            model_size=args.size,
-            freeze_backbone=args.freeze_backbone
-        )
+    try:
+        if args.model == 'dual':
+            model = VitaminPDual(
+                model_size=args.size,
+                dropout_rate=args.dropout,
+                freeze_backbone=args.freeze_backbone
+            )
+        elif args.model == 'flex':
+            model = VitaminPFlex(
+                model_size=args.size,
+                freeze_backbone=args.freeze_backbone
+            )
+        else:
+            raise ValueError(f"Unknown model type: {args.model}")
+        
+        # Print model info
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n{'='*80}")
+        print(f"Model Statistics")
+        print(f"{'='*80}")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Frozen parameters: {total_params - trainable_params:,}")
+        print(f"{'='*80}\n")
+        
+    except Exception as e:
+        print(f"❌ Error initializing model: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     
     # Generate run name if not provided
     if args.run_name is None:
-        args.run_name = f"Vitamin-P-{args.model.upper()}-{args.size}-fold{args.fold}"
+        aug_suffix = "" if args.no_augment else "-aug"
+        freeze_suffix = "-frozen" if args.freeze_backbone else ""
+        args.run_name = f"VitaminP{args.model.capitalize()}-{args.size}-fold{args.fold}{aug_suffix}{freeze_suffix}"
     
     # Initialize trainer
-    trainer = VitaminPTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        lr=args.lr,
-        weight_decay=1e-4,
-        use_wandb=not args.no_wandb,
-        project_name=args.wandb_project,
-        run_name=args.run_name,
-        checkpoint_dir=args.checkpoint_dir
-    )
+    print(f"{'='*80}")
+    print(f"Initializing Trainer")
+    print(f"{'='*80}")
+    print(f"Learning rate: {args.lr}")
+    print(f"Weight decay: {args.weight_decay}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Augmentations: {not args.no_augment}")
+    print(f"W&B logging: {not args.no_wandb}")
+    if not args.no_wandb:
+        print(f"W&B project: {args.wandb_project}")
+        print(f"W&B run name: {args.run_name}")
+    print(f"Checkpoint dir: {args.checkpoint_dir}")
+    print(f"{'='*80}\n")
+    
+    try:
+        trainer = VitaminPTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            fold=args.fold,
+            use_wandb=not args.no_wandb,
+            project_name=args.wandb_project,
+            run_name=args.run_name,
+            checkpoint_dir=args.checkpoint_dir
+        )
+    except Exception as e:
+        print(f"❌ Error initializing trainer: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     
     # Train
     print(f"\n{'='*80}")
-    print(f"Starting training for {args.epochs} epochs")
+    print(f"Starting Training")
     print(f"{'='*80}\n")
     
-    trainer.train(
-        epochs=args.epochs,
-        use_augmentations=not args.no_augment
-    )
-    
-    print("\n✅ Training completed successfully!")
+    try:
+        trainer.train(
+            epochs=args.epochs,
+            use_augmentations=not args.no_augment
+        )
+        print("\n✅ Training completed successfully!")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️  Training interrupted by user")
+        sys.exit(1)
+        
+    except Exception as e:
+        print(f"\n❌ Training failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

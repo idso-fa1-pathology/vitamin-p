@@ -228,6 +228,8 @@ class CRCZarrDataset(Dataset):
             'he_cell_instance': he_cell_mask,
             'mif_nuclei_instance': mif_nuclei_mask,
             'mif_cell_instance': mif_cell_mask,
+            'sample_name': sample_name,  # ADD THIS LINE
+            'patch_idx': patch_idx,      # ADD THIS LINE
         }
 
 
@@ -387,10 +389,17 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     batched = {}
     
     for key in batch[0].keys():
-        batched[key] = torch.stack([item[key] for item in batch])
+        if key in ['sample_name']:  # ADD THIS CHECK
+            # Keep as list for strings
+            batched[key] = [item[key] for item in batch]
+        elif key == 'patch_idx':
+            # Stack patch indices as tensor
+            batched[key] = torch.tensor([item[key] for item in batch])
+        else:
+            # Stack all other tensors normally
+            batched[key] = torch.stack([item[key] for item in batch])
     
     return batched
-
 
 def create_dataloaders(config) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """

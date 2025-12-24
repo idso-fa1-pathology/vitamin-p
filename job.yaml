@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-flex-large-fold2  # Change this for each job
+  name: vitamin-p-dual-base-fold3
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -26,19 +26,20 @@ spec:
       containers:
         - name: training-container
           image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
-          # NOW YOU JUST CHANGE THE ARGUMENTS! 🎉
           command: 
             - "python"
             - "scripts/train.py"
             - "--model"
-            - "flex"           # Change: flex, dual, he, mif
+            - "dual"           # Model type: dual or flex
             - "--size"
-            - "large"          # Change: small, base, large, giant
+            - "base"          # Model size: small, base, large, giant
             - "--fold"
-            - "1"              # Change: 1, 2, 3
+            - "3"             # Fold: 1, 2, 3
             - "--epochs"
             - "250"
-          workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
+            - "--wandb-project"
+            - "vitamin-p"
+          workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
           env:
             - name: WANDB_API_KEY
               value: "979fc21fe6b28c4e4a4503f7e421bfc270a4300c"
@@ -49,7 +50,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: PYTHONPATH
-              value: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p
+              value: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
           volumeMounts:
             - name: shm
               mountPath: "/dev/shm"
@@ -57,7 +58,7 @@ spec:
               mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
           resources:
             limits:
-              nvidia.com/gpu: "4"
+              nvidia.com/gpu: "2"
               cpu: "60"
               memory: "700Gi"
       restartPolicy: Never

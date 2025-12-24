@@ -3,6 +3,8 @@ Training script for Kubernetes job submission
 Usage: 
     python scripts/train.py --model dual --size base --fold 1
     python scripts/train.py --model flex --size large --fold 2
+    python scripts/train.py --model baseline_he --size base --fold 1
+    python scripts/train.py --model baseline_mif --size base --fold 1
 """
 
 import argparse
@@ -14,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dataset import Config, create_dataloaders
-from vitaminp import VitaminPDual, VitaminPFlex, VitaminPTrainer
+from vitaminp import VitaminPDual, VitaminPFlex, VitaminPBaselineHE, VitaminPBaselineMIF, VitaminPTrainer
 
 
 def main():
@@ -22,8 +24,8 @@ def main():
     
     # Model selection
     parser.add_argument('--model', type=str, required=True,
-                       choices=['dual', 'flex'],
-                       help='Model type: dual (Dual-Encoder) or flex (Single-Encoder)')
+                       choices=['dual', 'flex', 'baseline_he', 'baseline_mif'],
+                       help='Model type: dual (Dual-Encoder), flex (Single-Encoder), baseline_he (H&E-only), baseline_mif (MIF-only)')
     
     # Model configuration
     parser.add_argument('--size', type=str, default='base',
@@ -32,10 +34,10 @@ def main():
     
     parser.add_argument('--fold', type=int, required=True,
                        choices=[1, 2, 3, 4, 5],
-                       help='Fold number (1, 2, or 3)')
+                       help='Fold number (1-5)')
     
     parser.add_argument('--dropout', type=float, default=0.3,
-                       help='Dropout rate (only for dual model)')
+                       help='Dropout rate (for dual and baseline models)')
     
     # Training configuration
     parser.add_argument('--epochs', type=int, default=250,
@@ -77,7 +79,7 @@ def main():
     print(f"\n{'='*80}")
     print(f"Vitamin-P Training Setup")
     print(f"{'='*80}")
-    print(f"Model: VitaminP{args.model.capitalize()}")
+    print(f"Model: VitaminP{args.model.replace('_', ' ').title()}")
     print(f"Device: {device}")
     print(f"Available GPUs: {torch.cuda.device_count()}")
     if torch.cuda.is_available():
@@ -109,10 +111,10 @@ def main():
     
     # Initialize model
     print(f"\n{'='*80}")
-    print(f"Initializing VitaminP{args.model.capitalize()} Model")
+    print(f"Initializing VitaminP{args.model.replace('_', ' ').title()} Model")
     print(f"{'='*80}")
     print(f"Model size: {args.size.upper()}")
-    if args.model == 'dual':
+    if args.model in ['dual', 'baseline_he', 'baseline_mif']:
         print(f"Dropout rate: {args.dropout}")
     print(f"Freeze backbone: {args.freeze_backbone}")
     print(f"{'='*80}\n")
@@ -127,6 +129,18 @@ def main():
         elif args.model == 'flex':
             model = VitaminPFlex(
                 model_size=args.size,
+                freeze_backbone=args.freeze_backbone
+            )
+        elif args.model == 'baseline_he':
+            model = VitaminPBaselineHE(
+                model_size=args.size,
+                dropout_rate=args.dropout,
+                freeze_backbone=args.freeze_backbone
+            )
+        elif args.model == 'baseline_mif':
+            model = VitaminPBaselineMIF(
+                model_size=args.size,
+                dropout_rate=args.dropout,
                 freeze_backbone=args.freeze_backbone
             )
         else:
@@ -153,7 +167,8 @@ def main():
     if args.run_name is None:
         aug_suffix = "" if args.no_augment else "-aug"
         freeze_suffix = "-frozen" if args.freeze_backbone else ""
-        args.run_name = f"VitaminP{args.model.capitalize()}-{args.size}-fold{args.fold}{aug_suffix}{freeze_suffix}"
+        model_name = args.model.replace('_', '-').title()
+        args.run_name = f"VitaminP{model_name}-{args.size}-fold{args.fold}{aug_suffix}{freeze_suffix}"
     
     # Initialize trainer
     print(f"{'='*80}")

@@ -153,7 +153,13 @@ class Pix2PixTrainer:
             loss_GAN = self.criterion_GAN(pred_fake, True)
             
             # L1 loss (pixel-wise similarity)
-            loss_L1 = self.criterion_L1(fake_mif, mif_img)
+            # NEW: Weighted L1 - more weight on channel 1
+            ch0_weight = 1.0
+            ch1_weight = 2.0  # 2x more weight on channel 1
+
+            loss_L1_ch0 = self.criterion_L1(fake_mif[:, 0:1], mif_img[:, 0:1])
+            loss_L1_ch1 = self.criterion_L1(fake_mif[:, 1:2], mif_img[:, 1:2])
+            loss_L1 = (ch0_weight * loss_L1_ch0 + ch1_weight * loss_L1_ch1) / (ch0_weight + ch1_weight)
             
             # Total generator loss
             loss_G = loss_GAN + self.lambda_l1 * loss_L1
@@ -238,7 +244,13 @@ class Pix2PixTrainer:
             # Generator losses
             pred_fake = self.discriminator(he_img, fake_mif)
             loss_GAN = self.criterion_GAN(pred_fake, True)
-            loss_L1 = self.criterion_L1(fake_mif, mif_img)
+            # NEW: Weighted L1 - more weight on channel 1
+            ch0_weight = 1.0
+            ch1_weight = 2.0  # 2x more weight on channel 1
+
+            loss_L1_ch0 = self.criterion_L1(fake_mif[:, 0:1], mif_img[:, 0:1])
+            loss_L1_ch1 = self.criterion_L1(fake_mif[:, 1:2], mif_img[:, 1:2])
+            loss_L1 = (ch0_weight * loss_L1_ch0 + ch1_weight * loss_L1_ch1) / (ch0_weight + ch1_weight)
             loss_G = loss_GAN + self.lambda_l1 * loss_L1
             
             metrics['l1_loss'] += loss_L1.item()
@@ -323,6 +335,20 @@ class Pix2PixTrainer:
                 print(f'✅ Best model saved! Val L1: {val_metrics["l1_loss"]:.4f}\n')
         
         print(f"\n{'='*80}\nTraining Complete | Best Val L1 Loss: {self.best_val_loss:.4f}\n{'='*80}")
+        
+        # Save final model (in addition to best)
+        final_checkpoint_path = os.path.join(
+            self.checkpoint_dir,
+            'pix2pix_he_to_mif_final.pth'
+        )
+        torch.save({
+            'epoch': epochs,
+            'generator_state_dict': self.generator.state_dict(),
+            'discriminator_state_dict': self.discriminator.state_dict(),
+            'optimizer_G_state_dict': self.optimizer_G.state_dict(),
+            'optimizer_D_state_dict': self.optimizer_D.state_dict(),
+        }, final_checkpoint_path)
+        print(f"✅ Final model saved: {final_checkpoint_path}")
         
         if self.use_wandb:
             self.wandb.finish()

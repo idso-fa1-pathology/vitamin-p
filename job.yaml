@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-baseline-mif-large-fold3
+  name: vitamin-p-syn-dual-base-fold3
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -30,11 +30,11 @@ spec:
             - "python"
             - "scripts/train.py"
             - "--model"
-            - "baseline_mif"      # Model type: dual, flex, baseline_he, baseline_mif
+            - "dual"      # Model type: dual, flex, baseline_he, baseline_mif
             - "--size"
-            - "large"             # Model size: small, base, large, giant
+            - "base"             # Model size: small, base, large, giant
             - "--fold"
-            - "3"                # Fold: 1, 2, 3, 4, 5
+            - "13"                # Fold: 1, 2, 3, 4, 5
             - "--epochs"
             - "250"
             - "--wandb-project"

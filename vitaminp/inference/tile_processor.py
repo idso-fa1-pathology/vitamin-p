@@ -29,21 +29,95 @@ class TileProcessor:
         self.tile_size = tile_size
         self.overlap = overlap
         self.stride = tile_size - overlap
+        self.wsi_reader = None 
         
-    def extract_tiles(self, image):
-        """Extract overlapping tiles from large image
+    def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1):
+            """Extract tiles on-demand from WSI reader without loading full image (NEW)
+            
+            Args:
+                wsi_reader: WSIReader object with .read_region() method
+                filter_tissue: Whether to filter tiles by tissue content
+                tissue_threshold: Minimum tissue percentage (0-1) for a tile to be processed
+                
+            Returns:
+                positions: List of (y1, x1, y2, x2) positions
+                grid_shape: (n_tiles_h, n_tiles_w)
+                tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
+            """
+            h, w = wsi_reader.height, wsi_reader.width
+            self.wsi_reader = wsi_reader  # Store for later tile reading
+            
+            positions = []
+            tile_mask = []
+            
+            # Calculate number of tiles needed
+            n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
+            n_tiles_w = int(np.ceil((w - self.overlap) / self.stride))
+            
+            print(f"   Scanning {n_tiles_h}x{n_tiles_w} tile grid...")
+            
+            for i in range(n_tiles_h):
+                for j in range(n_tiles_w):
+                    # Calculate tile position
+                    y1 = i * self.stride
+                    x1 = j * self.stride
+                    y2 = min(y1 + self.tile_size, h)
+                    x2 = min(x1 + self.tile_size, w)
+                    
+                    # Adjust if we hit the edge
+                    if y2 - y1 < self.tile_size:
+                        y1 = max(0, y2 - self.tile_size)
+                    if x2 - x1 < self.tile_size:
+                        x1 = max(0, x2 - self.tile_size)
+                    
+                    # Tissue filtering
+                    if filter_tissue:
+                        # Read tile on-demand for tissue detection
+                        tile = wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
+                        tissue_pct = self._calculate_tissue_percentage(tile)
+                        has_tissue = tissue_pct >= tissue_threshold
+                        tile_mask.append(has_tissue)
+                    else:
+                        tile_mask.append(True)
+                    
+                    positions.append((y1, x1, y2, x2))
+            
+            return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
+        
+    def read_tile(self, position):
+        """Read a single tile from WSI reader (NEW)
         
         Args:
-            image: numpy array (H, W, 3)
+            position: (y1, x1, y2, x2) tile position
             
         Returns:
-            tiles: List of tile arrays
-            positions: List of (y1, x1, y2, x2) positions
-            grid_shape: (n_tiles_h, n_tiles_w)
+            numpy array (tile_size, tile_size, 3), padded if needed
+        """
+        if self.wsi_reader is None:
+            raise ValueError("No WSI reader available. Call extract_tiles_streaming first.")
+        
+        y1, x1, y2, x2 = position
+        
+        # Read region
+        tile = self.wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
+        
+        # Pad if needed (edge tiles)
+        if tile.shape[0] < self.tile_size or tile.shape[1] < self.tile_size:
+            padded = np.zeros((self.tile_size, self.tile_size, tile.shape[2]), dtype=tile.dtype)
+            padded[:tile.shape[0], :tile.shape[1]] = tile
+            tile = padded
+        
+        return tile
+    
+    def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1):
+        """Extract overlapping tiles from loaded image (LEGACY - for compatibility)
+        
+        This method loads the full image. For streaming, use extract_tiles_streaming().
         """
         h, w = image.shape[:2]
         tiles = []
         positions = []
+        tile_mask = []
         
         # Calculate number of tiles needed
         n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
@@ -65,17 +139,86 @@ class TileProcessor:
                 
                 tile = image[y1:y2, x1:x2]
                 
-                # Pad if necessary (edge cases)
+                # Tissue filtering
+                if filter_tissue:
+                    tissue_pct = self._calculate_tissue_percentage(tile)
+                    has_tissue = tissue_pct >= tissue_threshold
+                    tile_mask.append(has_tissue)
+                    
+                    if not has_tissue:
+                        tiles.append(None)
+                        positions.append((y1, x1, y2, x2))
+                        continue
+                else:
+                    tile_mask.append(True)
+                
+                # Pad edge tiles
                 if tile.shape[0] < self.tile_size or tile.shape[1] < self.tile_size:
-                    padded = np.zeros((self.tile_size, self.tile_size, 3), dtype=tile.dtype)
+                    padded = np.zeros((self.tile_size, self.tile_size, tile.shape[2]), dtype=tile.dtype)
                     padded[:tile.shape[0], :tile.shape[1]] = tile
                     tile = padded
                 
                 tiles.append(tile)
                 positions.append((y1, x1, y2, x2))
         
-        return tiles, positions, (n_tiles_h, n_tiles_w)
-    
+        return tiles, positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
+
+
+    def _calculate_tissue_percentage(self, tile):
+        """Calculate percentage of tissue in a tile using Otsu thresholding
+        
+        Args:
+            tile: RGB tile image (H, W, 3) or MIF image (H, W, 2)
+            
+        Returns:
+            float: Tissue percentage (0-1)
+        """
+        import cv2
+        
+        # **NEW: Handle different number of channels**
+        if tile.ndim != 3:
+            raise ValueError(f"Expected 3D tile (H, W, C), got shape {tile.shape}")
+        
+        n_channels = tile.shape[2]
+        
+        if n_channels == 3:
+            # RGB/H&E image - convert to grayscale
+            gray = cv2.cvtColor(tile, cv2.COLOR_RGB2GRAY)
+        elif n_channels == 2:
+            # MIF image - use first channel (nuclear) or max projection
+            # Option 1: Use nuclear channel only
+            gray = tile[:, :, 0]
+            
+            # Option 2: Use max projection of both channels (uncomment if preferred)
+            # gray = np.max(tile, axis=2)
+            
+            # Ensure uint8 for Otsu
+            if gray.dtype == np.float32 or gray.dtype == np.float64:
+                gray = (gray * 255).astype(np.uint8)
+            elif gray.dtype == np.uint16:
+                gray = (gray / 256).astype(np.uint8)
+        elif n_channels == 1:
+            # Single channel - use directly
+            gray = tile[:, :, 0]
+        else:
+            raise ValueError(f"Unsupported number of channels: {n_channels}")
+        
+        # Ensure gray is uint8
+        if gray.dtype != np.uint8:
+            gray = gray.astype(np.uint8)
+        
+        # Otsu's thresholding
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Invert if background is white (common in histology)
+        if binary.mean() > 127:
+            binary = 255 - binary
+        
+        # Calculate tissue percentage
+        tissue_pct = np.sum(binary > 0) / binary.size
+        
+        return tissue_pct
+
     def create_tile_weights(self):
         """Create smooth weight map for tile blending
         
@@ -119,14 +262,15 @@ class TileProcessor:
         full_map[y1:y2, x1:x2] += tile_pred[:tile_h, :tile_w] * tile_weights[:tile_h, :tile_w]
         weight_map[y1:y2, x1:x2] += tile_weights[:tile_h, :tile_w]
     
-    def stitch_predictions(self, tiles_preds, positions, image_shape, branch_outputs):
+    def stitch_predictions(self, tiles_preds, positions, image_shape, branch_outputs, tile_mask=None):
         """Stitch tile predictions back into full image
         
         Args:
-            tiles_preds: List of prediction dicts from each tile
+            tiles_preds: List of prediction dicts from each tile (can contain None for filtered tiles)
             positions: List of tile positions
             image_shape: Original image shape (H, W, C)
             branch_outputs: Dict with keys like 'seg', 'hv' for this branch
+            tile_mask: Boolean array indicating which tiles were processed (None if all processed)
             
         Returns:
             dict: Stitched predictions {seg, hv}
@@ -140,7 +284,11 @@ class TileProcessor:
         weight_map_hv = np.zeros((h, w), dtype=np.float32)
         
         # Blend all tiles
-        for pred, (y1, x1, y2, x2) in zip(tiles_preds, positions):
+        for idx, (pred, (y1, x1, y2, x2)) in enumerate(zip(tiles_preds, positions)):
+            # **NEW: Skip filtered tiles**
+            if pred is None:
+                continue
+            
             tile_h = y2 - y1
             tile_w = x2 - x1
             

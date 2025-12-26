@@ -3,7 +3,8 @@ from .tile_processor import TileProcessor
 from .utils import ResultExporter, setup_logger
 from .overlap_cleaner import OverlapCleaner
 from .postprocessing import process_model_outputs
-from .predictor import WSIPredictor  # ← Add this
+from .predictor import WSIPredictor
+from .channel_config import ChannelConfig, COMMON_CONFIGS, get_config_from_name  # ← NEW
 
 __all__ = [
     'WSIPredictor',
@@ -13,4 +14,7 @@ __all__ = [
     'OverlapCleaner',
     'setup_logger',
     'process_model_outputs',
+    'ChannelConfig',           # ← NEW
+    'COMMON_CONFIGS',          # ← NEW
+    'get_config_from_name',    # ← NEW
 ]

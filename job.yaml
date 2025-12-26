@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-syn-dual-base-fold3
+  name: vitamin-p-syn-dual-base-fold2
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -34,7 +34,7 @@ spec:
             - "--size"
             - "base"             # Model size: small, base, large, giant
             - "--fold"
-            - "13"                # Fold: 1, 2, 3, 4, 5
+            - "12"                # Fold: 1, 2, 3, 4, 5
             - "--epochs"
             - "250"
             - "--wandb-project"

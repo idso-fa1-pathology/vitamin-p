@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""WSI Predictor - High-level interface for whole slide inference."""
+"""WSI Predictor - High-level interface for whole slide inference with streaming support."""
 
 import time
 import torch
@@ -11,9 +11,9 @@ from pathlib import Path
 from tqdm import tqdm
 
 from vitaminp import SimplePreprocessing, prepare_he_input
+from vitaminp.postprocessing.hv_postprocess import process_model_outputs
 from .wsi_handler import MultiFormatImageLoader
 from .tile_processor import TileProcessor
-from .postprocessing import process_model_outputs
 from .overlap_cleaner import OverlapCleaner
 from .utils import ResultExporter, setup_logger
 
@@ -22,7 +22,7 @@ class WSIPredictor:
     """High-level predictor for whole slide image inference
     
     Handles the complete pipeline:
-    1. Load WSI (any format)
+    1. Load WSI (streaming - no full image loading!)
     2. Tile extraction
     3. Model inference
     4. Tile stitching
@@ -58,6 +58,7 @@ class WSIPredictor:
         magnification=40,
         mixed_precision=False,
         logger=None,
+        mif_channel_config=None,
     ):
         """Initialize WSI Predictor
         
@@ -71,6 +72,7 @@ class WSIPredictor:
             magnification: Magnification level (20 or 40)
             mixed_precision: Use FP16 for inference
             logger: Logger instance (creates one if None)
+            mif_channel_config: MIF channel configuration
         """
         self.model = model
         self.checkpoint_path = checkpoint_path
@@ -104,6 +106,10 @@ class WSIPredictor:
         self.logger.info(f"  Patch size: {patch_size}")
         self.logger.info(f"  Overlap: {overlap}")
         self.logger.info(f"  Magnification: {magnification}")
+        self.mif_channel_config = mif_channel_config
+        if mif_channel_config is not None:
+            self.logger.info(f"  MIF channels: {mif_channel_config.get_description()}")
+
     
     def predict(
         self,
@@ -122,6 +128,7 @@ class WSIPredictor:
         save_csv=False,
         save_heatmap=False,
         save_visualization=True,
+        detection_threshold=0.5,
     ):
         """Run inference on WSI
         
@@ -141,6 +148,7 @@ class WSIPredictor:
             save_csv: Save CSV results
             save_heatmap: Save heatmap
             save_visualization: Save visualizations
+            detection_threshold: Binary threshold for instance extraction
             
         Returns:
             dict: Results with predictions, instances, timing
@@ -171,6 +179,9 @@ class WSIPredictor:
                 save_geojson=save_geojson,
                 save_csv=save_csv,
                 save_visualization=save_visualization,
+                filter_tissue=filter_tissue,
+                tissue_threshold=tissue_threshold,
+                detection_threshold=detection_threshold,
             )
         else:
             # Multiple branches
@@ -192,6 +203,9 @@ class WSIPredictor:
                     save_geojson=save_geojson,
                     save_csv=save_csv,
                     save_visualization=save_visualization,
+                    filter_tissue=filter_tissue,
+                    tissue_threshold=tissue_threshold,
+                    detection_threshold=detection_threshold,
                 )
                 all_results[b] = results
             
@@ -209,49 +223,110 @@ class WSIPredictor:
         save_geojson,
         save_csv,
         save_visualization,
+        filter_tissue=False,
+        tissue_threshold=0.1,
+        detection_threshold=0.5,
     ):
-        """Process a single branch"""
+        """Process a single branch with streaming tile loading"""
         start_time = time.time()
         
-        # 1. Load image
-        self.logger.info(f"📁 Loading image: {wsi_path}")
-        image = self.wsi_handler.load_image(wsi_path)
-        self.logger.info(f"   ✓ Size: {image.shape[1]}x{image.shape[0]} pixels")
+        # Detect if this is a MIF branch
+        is_mif = 'mif' in branch.lower()
         
-        # 2. Extract tiles
-        self.logger.info(f"📐 Extracting tiles...")
-        tiles, positions, (n_h, n_w) = self.tile_processor.extract_tiles(image)
-        self.logger.info(f"   ✓ Created {len(tiles)} tiles ({n_h}x{n_w} grid)")
+        # 1. Open WSI reader (streaming - no full loading!)
+        self.logger.info(f"📁 Opening WSI: {wsi_path}")
         
-        # 3. Run inference
+        if is_mif:
+            # MIF still needs full load (TODO: add MIF streaming support later)
+            image = self.wsi_handler.load_mif_image(wsi_path, self.mif_channel_config)
+            image = np.transpose(image, (1, 2, 0))
+            self.logger.info(f"   ✓ MIF Size: {image.shape[0]}x{image.shape[1]} pixels, {image.shape[2]} channels")
+            
+            # Use legacy tile extraction for MIF
+            self.logger.info(f"📐 Extracting tiles...")
+            tiles, positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles(
+                image,
+                filter_tissue=filter_tissue,
+                tissue_threshold=tissue_threshold
+            )
+            wsi_reader = None
+            image_shape = image.shape
+        else:
+            # H&E: Use streaming approach (no full image loading!)
+            wsi_reader = self.wsi_handler.get_wsi_reader(wsi_path)
+            self.logger.info(f"   ✓ Size: {wsi_reader.width}x{wsi_reader.height} pixels")
+            
+            # 2. Extract tile positions only (no actual tiles loaded yet!)
+            self.logger.info(f"📐 Extracting tile positions...")
+            positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
+                wsi_reader,
+                filter_tissue=filter_tissue,
+                tissue_threshold=tissue_threshold
+            )
+            tiles = None  # Will be loaded on-demand during inference
+            image_shape = (wsi_reader.height, wsi_reader.width, 3)
+            image = None  # Not loaded
+
+        # Count tissue tiles
+        if tile_mask is not None:
+            n_tissue_tiles = sum(tile_mask)
+            tissue_pct = n_tissue_tiles / len(positions) * 100
+            self.logger.info(f"   ✓ Created {len(positions)} tiles ({n_h}x{n_w} grid)")
+            self.logger.info(f"   ✓ Tissue tiles: {n_tissue_tiles}/{len(positions)} ({tissue_pct:.1f}%)")
+        else:
+            self.logger.info(f"   ✓ Created {len(positions)} tiles ({n_h}x{n_w} grid)")
+        
+        # 3. Run inference (streaming tiles on-demand)
         self.logger.info(f"🧠 Running predictions on {branch}...")
         tiles_preds = []
-        
-        for tile in tqdm(tiles, desc="Processing tiles"):
-            pred = self._predict_tile(tile, branch)
-            tiles_preds.append(pred)
+
+        if tiles is not None:
+            # MIF path - tiles already loaded
+            for tile in tqdm(tiles, desc="Processing tiles"):
+                if tile is None:
+                    tiles_preds.append(None)
+                    continue
+                pred = self._predict_tile(tile, branch, is_mif=is_mif)
+                tiles_preds.append(pred)
+        else:
+            # H&E streaming path - load tiles on-demand
+            for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
+                if tile_mask is not None and not tile_mask[idx]:
+                    tiles_preds.append(None)
+                    continue
+                
+                # Read tile on-demand from WSI
+                tile = self.tile_processor.read_tile(position)
+                pred = self._predict_tile(tile, branch, is_mif=is_mif)
+                tiles_preds.append(pred)
+            
+            # Close WSI reader
+            if wsi_reader is not None:
+                wsi_reader.close()
         
         # 4. Stitch predictions
         self.logger.info(f"🧩 Stitching predictions...")
         stitched = self.tile_processor.stitch_predictions(
             tiles_preds=tiles_preds,
             positions=positions,
-            image_shape=image.shape,
-            branch_outputs=None
+            image_shape=image_shape,
+            branch_outputs=None,
+            tile_mask=tile_mask
         )
         
         # Apply threshold
-        stitched['seg'] = (stitched['seg'] > 0.5).astype(np.float32)
-        coverage = (stitched['seg'] > 0).sum() / stitched['seg'].size * 100
+        coverage = (stitched['seg'] > detection_threshold).sum() / stitched['seg'].size * 100
         self.logger.info(f"   ✓ Coverage: {coverage:.2f}%")
         
-        # 5. Extract instances
+        # 5. Extract instances using improved HoVer-Net post-processing
         self.logger.info(f"🔍 Extracting instances...")
         inst_map, inst_info, num_instances = process_model_outputs(
             seg_pred=stitched['seg'],
             h_map=stitched['hv'][:, :, 0],
             v_map=stitched['hv'][:, :, 1],
-            magnification=self.magnification
+            magnification=self.magnification,
+            binary_threshold=detection_threshold,
+            use_gpu=False
         )
         self.logger.info(f"   ✓ Detected {num_instances} instances (before cleaning)")
         
@@ -283,6 +358,14 @@ class WSIPredictor:
             self._save_masks(stitched, output_dir, object_type)
         
         if save_visualization:
+            # For visualization, need to load image if not already loaded
+            if image is None:
+                # Re-open for visualization only
+                self.logger.info(f"   Loading full image for visualization...")
+                wsi_reader_viz = self.wsi_handler.get_wsi_reader(wsi_path)
+                image = wsi_reader_viz.read_region((0, 0), (wsi_reader_viz.width, wsi_reader_viz.height))
+                wsi_reader_viz.close()
+            
             self._save_visualization(image, inst_info, output_dir, object_type)
         
         processing_time = time.time() - start_time
@@ -299,15 +382,32 @@ class WSIPredictor:
         self.logger.info(f"✅ Complete! {num_instances} detections in {processing_time:.2f}s")
         
         return results
-    
-    def _predict_tile(self, tile, branch):
-        """Run inference on a single tile"""
+
+
+    def _predict_tile(self, tile, branch, is_mif=False):
+        """Run inference on a single tile
+        
+        Args:
+            tile: Tile image (H, W, C)
+            branch: Branch name
+            is_mif: Whether this is MIF data (affects preprocessing)
+        """
         # Prepare tile
         if tile.max() > 1.0:
             tile = tile.astype(np.float32) / 255.0
         
+        # Convert to tensor: (H, W, C) -> (1, C, H, W)
         tile_tensor = torch.from_numpy(tile).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        tile_tensor = prepare_he_input(tile_tensor)
+        
+        # Apply appropriate preprocessing based on image type
+        if is_mif:
+            from vitaminp import prepare_mif_input
+            tile_tensor = prepare_mif_input(tile_tensor)
+        else:
+            from vitaminp import prepare_he_input
+            tile_tensor = prepare_he_input(tile_tensor)
+        
+        # Apply normalization
         tile_tensor = self.preprocessor.percentile_normalize(tile_tensor)
         
         # Predict
@@ -324,7 +424,7 @@ class WSIPredictor:
         hv = outputs[branch_config['hv_key']][0].cpu().numpy()
         
         return {'seg': seg, 'hv': hv}
-    
+
     def _clean_overlaps(self, inst_info, iou_threshold):
         """Clean overlapping instances"""
         detections = []
@@ -379,18 +479,65 @@ class WSIPredictor:
         )
     
     def _save_visualization(self, image, inst_info, output_dir, object_type):
-        """Save visualization with contours"""
-        vis_image = image.copy()
+        """Save visualization with contours
         
+        Args:
+            image: Original image (H, W, 3) for RGB or (H, W, 2) for MIF
+            inst_info: Instance information dictionary
+            output_dir: Output directory
+            object_type: 'nuclei' or 'cell'
+        """
+        # Handle both RGB and MIF images
+        if image.shape[2] == 2:
+            # MIF image - create RGB visualization
+            vis_image = np.zeros((image.shape[0], image.shape[1], 3), dtype=np.float32)
+            vis_image[:, :, 0] = image[:, :, 0]  # Nuclear -> Red channel
+            vis_image[:, :, 1] = image[:, :, 1]  # Membrane -> Green channel
+            
+            # Normalize to 0-255
+            if vis_image.max() <= 1.0:
+                vis_image = (vis_image * 255).astype(np.uint8)
+            else:
+                vis_image = vis_image.astype(np.uint8)
+        elif image.shape[2] == 3:
+            # RGB image - use directly
+            vis_image = image.copy()
+        else:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+        
+        # Draw contours and centroids
         for inst_id, inst_data in inst_info.items():
             contour = inst_data['contour']
-            if len(contour) >= 3:
+            
+            # Ensure contour is in correct shape for cv2.drawContours
+            if isinstance(contour, np.ndarray) and len(contour) >= 3:
+                # Convert to shape (N, 1, 2) if needed
+                if contour.ndim == 2:
+                    contour = contour.reshape(-1, 1, 2).astype(np.int32)
+                else:
+                    contour = contour.astype(np.int32)
+                
                 cv2.drawContours(vis_image, [contour], -1, (0, 255, 0), 2)
             
-            centroid = inst_data['centroid'].astype(int)
+            # Draw centroid
+            centroid = inst_data['centroid']
+            if isinstance(centroid, np.ndarray):
+                centroid = centroid.astype(int)
+            else:
+                centroid = np.array(centroid, dtype=int)
+            
             cv2.circle(vis_image, tuple(centroid), 3, (255, 0, 0), -1)
         
-        cv2.imwrite(
-            str(output_dir / f'{object_type}_boundaries.png'),
-            cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR)
-        )
+        # Handle color conversion based on image type
+        if image.shape[2] == 2:
+            # MIF was already converted to RGB above, save directly
+            cv2.imwrite(
+                str(output_dir / f'{object_type}_boundaries.png'),
+                vis_image
+            )
+        else:
+            # RGB image - convert RGB to BGR for OpenCV
+            cv2.imwrite(
+                str(output_dir / f'{object_type}_boundaries.png'),
+                cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR)
+            )

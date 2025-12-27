@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""WSI Predictor - High-level interface for whole slide inference with streaming support."""
+"""WSI Predictor - High-level interface for whole slide inference with per-tile processing."""
 
 import time
 import torch
@@ -11,7 +11,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 from vitaminp import SimplePreprocessing, prepare_he_input
-from vitaminp.postprocessing.hv_postprocess import process_model_outputs
 from .wsi_handler import MultiFormatImageLoader
 from .tile_processor import TileProcessor
 from .overlap_cleaner import OverlapCleaner
@@ -21,14 +20,17 @@ from .utils import ResultExporter, setup_logger
 class WSIPredictor:
     """High-level predictor for whole slide image inference
     
-    Handles the complete pipeline:
+    NEW ARCHITECTURE (CellViT-style):
     1. Load WSI (streaming - no full image loading!)
-    2. Tile extraction
-    3. Model inference
-    4. Tile stitching
-    5. Instance extraction
-    6. Overlap cleaning
-    7. Export results
+    2. Tile extraction positions
+    3. FOR EACH TILE:
+       a. Load tile on-demand
+       b. Run model inference
+       c. IMMEDIATELY extract instances (512x512 - FAST!)
+       d. Convert coordinates to global
+    4. Collect all instances from all tiles
+    5. Clean overlaps (only at tile boundaries)
+    6. Export results
     
     Example:
         >>> model = VitaminPFlex(model_size='large').to('cuda')
@@ -227,7 +229,7 @@ class WSIPredictor:
         tissue_threshold=0.1,
         detection_threshold=0.5,
     ):
-        """Process a single branch with streaming tile loading"""
+        """Process a single branch with per-tile instance extraction (NEW ARCHITECTURE)"""
         start_time = time.time()
         
         # Detect if this is a MIF branch
@@ -276,63 +278,89 @@ class WSIPredictor:
         else:
             self.logger.info(f"   ✓ Created {len(positions)} tiles ({n_h}x{n_w} grid)")
         
-        # 3. Run inference (streaming tiles on-demand)
-        self.logger.info(f"🧠 Running predictions on {branch}...")
-        tiles_preds = []
-
+        # ========================================================================
+        # 🔥 NEW ARCHITECTURE: Process tiles and extract instances IMMEDIATELY
+        # ========================================================================
+        self.logger.info(f"🧠 Running predictions and extracting instances on {branch}...")
+        
+        all_cells = []  # Collect all cells from all tiles
+        tiles_preds_for_viz = []  # Only for visualization (optional)
+        
         if tiles is not None:
             # MIF path - tiles already loaded
-            for tile in tqdm(tiles, desc="Processing tiles"):
-                if tile is None:
-                    tiles_preds.append(None)
+            for idx, tile in enumerate(tqdm(positions, desc="Processing tiles")):
+                if tile_mask is not None and not tile_mask[idx]:
+                    tiles_preds_for_viz.append(None)
                     continue
+                
+                tile = tiles[idx]
+                position = positions[idx]
+                
+                # Run inference
                 pred = self._predict_tile(tile, branch, is_mif=is_mif)
-                tiles_preds.append(pred)
+                tiles_preds_for_viz.append(pred)
+                
+                # IMMEDIATELY extract instances from this tile
+                cells_in_tile = self.tile_processor.process_tile_instances(
+                    tile_pred=pred,
+                    position=position,
+                    magnification=self.magnification,
+                    detection_threshold=detection_threshold,
+                    use_gpu=True  # Now safe to use GPU on small tiles!
+                )
+                all_cells.extend(cells_in_tile)
         else:
             # H&E streaming path - load tiles on-demand
             for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
                 if tile_mask is not None and not tile_mask[idx]:
-                    tiles_preds.append(None)
+                    tiles_preds_for_viz.append(None)
                     continue
                 
                 # Read tile on-demand from WSI
                 tile = self.tile_processor.read_tile(position)
+                
+                # Run inference
                 pred = self._predict_tile(tile, branch, is_mif=is_mif)
-                tiles_preds.append(pred)
+                
+                if save_masks or save_visualization:
+                    tiles_preds_for_viz.append(pred)
+                
+                # IMMEDIATELY extract instances from this tile (CellViT style!)
+                cells_in_tile = self.tile_processor.process_tile_instances(
+                    tile_pred=pred,
+                    position=position,
+                    magnification=self.magnification,
+                    detection_threshold=detection_threshold,
+                    use_gpu=True  # GPU is efficient on 512x512 tiles!
+                )
+                all_cells.extend(cells_in_tile)
             
             # Close WSI reader
             if wsi_reader is not None:
                 wsi_reader.close()
         
-        # 4. Stitch predictions
-        self.logger.info(f"🧩 Stitching predictions...")
-        stitched = self.tile_processor.stitch_predictions(
-            tiles_preds=tiles_preds,
-            positions=positions,
-            image_shape=image_shape,
-            branch_outputs=None,
-            tile_mask=tile_mask
-        )
+        self.logger.info(f"   ✓ Extracted {len(all_cells)} instances from tiles (before cleaning)")
         
-        # Apply threshold
-        coverage = (stitched['seg'] > detection_threshold).sum() / stitched['seg'].size * 100
-        self.logger.info(f"   ✓ Coverage: {coverage:.2f}%")
+        # Convert cells list to inst_info dict format
+        inst_info = {}
+        for idx, cell in enumerate(all_cells, start=1):
+            inst_info[idx] = {
+                'bbox': np.array(cell['bbox']),
+                'centroid': np.array(cell['centroid']),
+                'contour': np.array(cell['contour']),
+                'type_prob': cell.get('type_prob'),
+                'type': cell.get('type'),
+            }
         
-        # 5. Extract instances using improved HoVer-Net post-processing
-        self.logger.info(f"🔍 Extracting instances...")
-        inst_map, inst_info, num_instances = process_model_outputs(
-            seg_pred=stitched['seg'],
-            h_map=stitched['hv'][:, :, 0],
-            v_map=stitched['hv'][:, :, 1],
-            magnification=self.magnification,
-            binary_threshold=detection_threshold,
-            use_gpu=False
-        )
-        self.logger.info(f"   ✓ Detected {num_instances} instances (before cleaning)")
+        num_instances = len(inst_info)
         
-        # 6. Clean overlaps
+        # 6. Clean overlaps (only cells at tile boundaries)
         if clean_overlaps and len(inst_info) > 0:
-            self.logger.info(f"🧹 Cleaning overlapping instances...")
+            self.logger.info(f"🧹 Cleaning overlapping instances at tile boundaries...")
+            # Filter to only clean edge cells (more efficient)
+            edge_cells = [cell for cell in all_cells if cell.get('edge_position', False)]
+            self.logger.info(f"   Found {len(edge_cells)} edge cells to check for overlaps")
+            
             inst_info = self._clean_overlaps(inst_info, iou_threshold)
             num_instances = len(inst_info)
             self.logger.info(f"   ✓ After cleaning: {num_instances} instances")
@@ -354,8 +382,19 @@ class WSIPredictor:
                 object_type=object_type
             )
         
-        if save_masks:
-            self._save_masks(stitched, output_dir, object_type)
+        if save_masks or save_visualization:
+            # Create stitched predictions for visualization only
+            self.logger.info(f"   Creating visualization masks...")
+            stitched = self.tile_processor.stitch_predictions(
+                tiles_preds=tiles_preds_for_viz,
+                positions=positions,
+                image_shape=image_shape,
+                branch_outputs=None,
+                tile_mask=tile_mask
+            )
+            
+            if save_masks:
+                self._save_masks(stitched, output_dir, object_type)
         
         if save_visualization:
             # For visualization, need to load image if not already loaded
@@ -375,7 +414,6 @@ class WSIPredictor:
             'num_detections': num_instances,
             'processing_time': processing_time,
             'output_dir': str(output_dir),
-            'predictions': stitched,
             'instances': inst_info,
         }
         

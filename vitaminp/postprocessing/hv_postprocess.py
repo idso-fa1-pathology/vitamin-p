@@ -92,7 +92,6 @@ class HVPostProcessor:
         if self.use_gpu:
             # Warm up GPU immediately to avoid delay later
             _ = cp.zeros(1)  # Trigger CUDA initialization NOW
-            print(f"✓ GPU acceleration enabled (CuPy) - warmed up")
         else:
             if use_gpu and not CUPY_AVAILABLE:
                 print(f"⚠ GPU requested but CuPy not available, using CPU")
@@ -172,7 +171,6 @@ class HVPostProcessor:
         h_dir_raw = pred[..., 1]  # Horizontal direction
         v_dir_raw = pred[..., 2]  # Vertical direction
 
-        print(f"   [HV DEBUG] Starting HV processing on {pred.shape} image...")  # ← ADD
 
         # Step 1: Process binary map (GPU-accelerated if available)
         # Step 1: Process binary map (GPU-accelerated if available)
@@ -196,7 +194,6 @@ class HVPostProcessor:
 
         blb = remove_small_objects(blb, min_size=10)
         blb[blb > 0] = 1
-        print(f"   [HV DEBUG] Step 1 (binary label): {time.time()-t1:.1f}s")
         # Step 2: Normalize HV maps
         t2 = time.time()  # ← ADD
         h_dir = cv2.normalize(
@@ -215,7 +212,6 @@ class HVPostProcessor:
             norm_type=cv2.NORM_MINMAX,
             dtype=cv2.CV_32F,
         )
-        print(f"   [HV DEBUG] Step 2 (normalize): {time.time()-t2:.1f}s")  # ← ADD
 
         # Step 3: Apply Sobel edge detection
         t3 = time.time()  # ← ADD
@@ -243,21 +239,18 @@ class HVPostProcessor:
                 dtype=cv2.CV_32F,
             )
         )
-        print(f"   [HV DEBUG] Step 3 (Sobel): {time.time()-t3:.1f}s")  # ← ADD
 
         # Step 4: Create energy map
         t4 = time.time()  # ← ADD
         overall = np.maximum(sobelh, sobelv)
         overall = overall - (1 - blb)  # Mask with binary map
         overall[overall < 0] = 0
-        print(f"   [HV DEBUG] Step 4 (energy map): {time.time()-t4:.1f}s")  # ← ADD
 
         # Step 5: Create distance map for watershed
         t5 = time.time()  # ← ADD
         dist = (1.0 - overall) * blb
         # Invert for watershed (nuclei become valleys)
         dist = -cv2.GaussianBlur(dist, (3, 3), 0)
-        print(f"   [HV DEBUG] Step 5 (distance map): {time.time()-t5:.1f}s")  # ← ADD
 
         # Step 6: Generate markers
         t6 = time.time()  # ← ADD
@@ -279,13 +272,10 @@ class HVPostProcessor:
             marker = measurements.label(marker)[0]
         
         marker = remove_small_objects(marker, min_size=object_size)
-        print(f"   [HV DEBUG] Step 6 (markers): {time.time()-t6:.1f}s")  # ← ADD
 
         # Step 7: Apply watershed
         t7 = time.time()  # ← ADD
         proced_pred = watershed(dist, markers=marker, mask=blb)
-        print(f"   [HV DEBUG] Step 7 (watershed): {time.time()-t7:.1f}s")  # ← ADD
-        print(f"   [HV DEBUG] Total HV processing: {time.time()-t_start:.1f}s")  # ← ADD
 
         return proced_pred
 
@@ -293,27 +283,22 @@ class HVPostProcessor:
         self, 
         instance_map: np.ndarray, 
         pred_type: Optional[np.ndarray] = None,
-        show_progress: bool = True
+        show_progress: bool = False
     ) -> dict:
         """Extract information for each detected instance (GPU-accelerated with progress bar)"""
         
         import time
         
-        print(f"🔍 DEBUG: Starting instance extraction...")
-        print(f"   Instance map shape: {instance_map.shape}")
-        print(f"   Instance map dtype: {instance_map.dtype}")
+
         
         # GPU-accelerated unique operation
         t0 = time.time()
         if self.use_gpu:
-            print(f"   Using GPU for unique operation...")
             inst_id_list_gpu = cp.unique(cp.asarray(instance_map))[1:]
             inst_id_list = cp.asnumpy(inst_id_list_gpu)
         else:
-            print(f"   Using CPU for unique operation...")
             inst_id_list = np.unique(instance_map)[1:]  # Exclude background
         
-        print(f"   ✓ Found {len(inst_id_list)} unique instances in {time.time()-t0:.2f}s")
         
         inst_info_dict = {}
         
@@ -384,18 +369,10 @@ class HVPostProcessor:
             # Print debug info every 1000 instances
             if idx > 0 and idx % 1000 == 0:
                 elapsed = time.time() - t_total
-                print(f"\n   DEBUG @ {idx} instances:")
-                print(f"      Total time: {elapsed:.2f}s ({elapsed/idx*1000:.2f}s per 1000)")
-                print(f"      BBox time: {t_bbox:.2f}s ({t_bbox/elapsed*100:.1f}%)")
-                print(f"      Contour time: {t_contour:.2f}s ({t_contour/elapsed*100:.1f}%)")
 
-        print(f"\n   ✓ Extracted {len(inst_info_dict)} instances in {time.time()-t_total:.2f}s")
-        print(f"      BBox total: {t_bbox:.2f}s")
-        print(f"      Contour total: {t_contour:.2f}s")
 
         # Extract cell types if available
         if pred_type is not None:
-            print(f"   Extracting cell types...")
             t_type = time.time()
             for inst_id in list(inst_info_dict.keys()):
                 rmin, cmin, rmax, cmax = (inst_info_dict[inst_id]["bbox"]).flatten()
@@ -417,7 +394,6 @@ class HVPostProcessor:
                 
                 inst_info_dict[inst_id]["type"] = int(inst_type)
                 inst_info_dict[inst_id]["type_prob"] = float(type_prob)
-            print(f"   ✓ Type extraction: {time.time()-t_type:.2f}s")
 
         return inst_info_dict
 # Convenience functions for easy usage

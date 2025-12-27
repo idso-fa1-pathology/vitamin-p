@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Tile-based processing for large images."""
+"""Tile-based processing for large images with per-tile post-processing."""
 
 import torch
 import numpy as np
@@ -10,10 +10,12 @@ from tqdm import tqdm
 class TileProcessor:
     """Efficient tile-based inference for large histology images
     
-    Strategy:
-    - Binary masks: Use MAXIMUM blending (preserves all detections)
-    - HV maps: Use weighted averaging (smooth gradients)
-    - Threshold AFTER stitching to avoid dilution
+    NEW Strategy:
+    - Process each tile immediately after inference (like CellViT)
+    - Extract instances from each tile locally
+    - Convert coordinates from local to global
+    - Collect all instances across tiles
+    - Clean overlaps only at tile boundaries
     """
     
     def __init__(self, model, device, tile_size=512, overlap=64):
@@ -32,57 +34,57 @@ class TileProcessor:
         self.wsi_reader = None 
         
     def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1):
-            """Extract tiles on-demand from WSI reader without loading full image (NEW)
+        """Extract tiles on-demand from WSI reader without loading full image (NEW)
+        
+        Args:
+            wsi_reader: WSIReader object with .read_region() method
+            filter_tissue: Whether to filter tiles by tissue content
+            tissue_threshold: Minimum tissue percentage (0-1) for a tile to be processed
             
-            Args:
-                wsi_reader: WSIReader object with .read_region() method
-                filter_tissue: Whether to filter tiles by tissue content
-                tissue_threshold: Minimum tissue percentage (0-1) for a tile to be processed
+        Returns:
+            positions: List of (y1, x1, y2, x2) positions
+            grid_shape: (n_tiles_h, n_tiles_w)
+            tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
+        """
+        h, w = wsi_reader.height, wsi_reader.width
+        self.wsi_reader = wsi_reader  # Store for later tile reading
+        
+        positions = []
+        tile_mask = []
+        
+        # Calculate number of tiles needed
+        n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
+        n_tiles_w = int(np.ceil((w - self.overlap) / self.stride))
+        
+        print(f"   Scanning {n_tiles_h}x{n_tiles_w} tile grid...")
+        
+        for i in range(n_tiles_h):
+            for j in range(n_tiles_w):
+                # Calculate tile position
+                y1 = i * self.stride
+                x1 = j * self.stride
+                y2 = min(y1 + self.tile_size, h)
+                x2 = min(x1 + self.tile_size, w)
                 
-            Returns:
-                positions: List of (y1, x1, y2, x2) positions
-                grid_shape: (n_tiles_h, n_tiles_w)
-                tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
-            """
-            h, w = wsi_reader.height, wsi_reader.width
-            self.wsi_reader = wsi_reader  # Store for later tile reading
-            
-            positions = []
-            tile_mask = []
-            
-            # Calculate number of tiles needed
-            n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
-            n_tiles_w = int(np.ceil((w - self.overlap) / self.stride))
-            
-            print(f"   Scanning {n_tiles_h}x{n_tiles_w} tile grid...")
-            
-            for i in range(n_tiles_h):
-                for j in range(n_tiles_w):
-                    # Calculate tile position
-                    y1 = i * self.stride
-                    x1 = j * self.stride
-                    y2 = min(y1 + self.tile_size, h)
-                    x2 = min(x1 + self.tile_size, w)
-                    
-                    # Adjust if we hit the edge
-                    if y2 - y1 < self.tile_size:
-                        y1 = max(0, y2 - self.tile_size)
-                    if x2 - x1 < self.tile_size:
-                        x1 = max(0, x2 - self.tile_size)
-                    
-                    # Tissue filtering
-                    if filter_tissue:
-                        # Read tile on-demand for tissue detection
-                        tile = wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
-                        tissue_pct = self._calculate_tissue_percentage(tile)
-                        has_tissue = tissue_pct >= tissue_threshold
-                        tile_mask.append(has_tissue)
-                    else:
-                        tile_mask.append(True)
-                    
-                    positions.append((y1, x1, y2, x2))
-            
-            return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
+                # Adjust if we hit the edge
+                if y2 - y1 < self.tile_size:
+                    y1 = max(0, y2 - self.tile_size)
+                if x2 - x1 < self.tile_size:
+                    x1 = max(0, x2 - self.tile_size)
+                
+                # Tissue filtering
+                if filter_tissue:
+                    # Read tile on-demand for tissue detection
+                    tile = wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
+                    tissue_pct = self._calculate_tissue_percentage(tile)
+                    has_tissue = tissue_pct >= tissue_threshold
+                    tile_mask.append(has_tissue)
+                else:
+                    tile_mask.append(True)
+                
+                positions.append((y1, x1, y2, x2))
+        
+        return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
         
     def read_tile(self, position):
         """Read a single tile from WSI reader (NEW)
@@ -219,12 +221,80 @@ class TileProcessor:
         
         return tissue_pct
 
-    def create_tile_weights(self):
-        """Create smooth weight map for tile blending
+    def process_tile_instances(
+        self, 
+        tile_pred, 
+        position, 
+        magnification=40, 
+        detection_threshold=0.5,
+        use_gpu=True
+    ):
+        """Process a single tile to extract instances (NEW - CellViT style)
         
+        This is the KEY function that processes each tile immediately!
+        
+        Args:
+            tile_pred: Dict with 'seg' and 'hv' predictions for this tile
+            position: (y1, x1, y2, x2) global position of this tile
+            magnification: Magnification level (20 or 40)
+            detection_threshold: Binary threshold
+            use_gpu: Use GPU for post-processing
+            
         Returns:
-            numpy array: Weight map (tile_size, tile_size)
+            List of cell dictionaries with GLOBAL coordinates
         """
+        from vitaminp.postprocessing.hv_postprocess import process_model_outputs
+        
+        y1, x1, y2, x2 = position
+        
+        # Extract instances from THIS TILE ONLY (small 512x512)
+        inst_map, inst_info, num_instances = process_model_outputs(
+            seg_pred=tile_pred['seg'],
+            h_map=tile_pred['hv'][0],
+            v_map=tile_pred['hv'][1],
+            magnification=magnification,
+            binary_threshold=detection_threshold,
+            use_gpu=use_gpu  # Now we can use GPU efficiently!
+        )
+        
+        # Convert local coordinates to global coordinates
+        cells_global = []
+        for inst_id, cell_data in inst_info.items():
+            # Adjust coordinates from tile-local to WSI-global
+            cell_global = {
+                'bbox': (cell_data['bbox'] + np.array([[y1, x1], [y1, x1]])).tolist(),
+                'centroid': (cell_data['centroid'] + np.array([x1, y1])).tolist(),
+                'contour': (cell_data['contour'] + np.array([x1, y1])).tolist(),
+                'type_prob': cell_data.get('type_prob'),
+                'type': cell_data.get('type'),
+                'patch_coordinates': position,  # Store which tile this came from
+                'edge_position': self._is_edge_cell(cell_data['bbox'], self.tile_size, margin=self.overlap//2),
+            }
+            cells_global.append(cell_global)
+        
+        return cells_global
+    
+    def _is_edge_cell(self, bbox, patch_size, margin=32):
+        """Check if a cell is near the edge of a tile
+        
+        Args:
+            bbox: Bounding box [[rmin, cmin], [rmax, cmax]]
+            patch_size: Size of the patch
+            margin: Margin to consider as edge
+            
+        Returns:
+            bool: True if cell is near edge
+        """
+        bbox = np.array(bbox)
+        return (np.max(bbox) > patch_size - margin or np.min(bbox) < margin)
+    
+    # ============================================================================
+    # LEGACY METHODS (kept for backward compatibility with old stitching approach)
+    # These are no longer used in the new per-tile processing approach
+    # ============================================================================
+    
+    def create_tile_weights(self):
+        """Create smooth weight map for tile blending (LEGACY)"""
         weights = np.ones((self.tile_size, self.tile_size), dtype=np.float32)
         
         # Create smooth falloff at edges
@@ -246,15 +316,7 @@ class TileProcessor:
         return weights
     
     def blend_overlaps(self, full_map, tile_pred, y1, x1, y2, x2, weight_map, tile_weights):
-        """Blend tile predictions using weighted averaging
-        
-        Args:
-            full_map: Full image map to update
-            tile_pred: Tile prediction
-            y1, x1, y2, x2: Tile position
-            weight_map: Accumulated weights
-            tile_weights: Weight map for this tile
-        """
+        """Blend tile predictions using weighted averaging (LEGACY)"""
         tile_h = y2 - y1
         tile_w = x2 - x1
         
@@ -263,17 +325,10 @@ class TileProcessor:
         weight_map[y1:y2, x1:x2] += tile_weights[:tile_h, :tile_w]
     
     def stitch_predictions(self, tiles_preds, positions, image_shape, branch_outputs, tile_mask=None):
-        """Stitch tile predictions back into full image
+        """Stitch tile predictions back into full image (LEGACY - for visualization only)
         
-        Args:
-            tiles_preds: List of prediction dicts from each tile (can contain None for filtered tiles)
-            positions: List of tile positions
-            image_shape: Original image shape (H, W, C)
-            branch_outputs: Dict with keys like 'seg', 'hv' for this branch
-            tile_mask: Boolean array indicating which tiles were processed (None if all processed)
-            
-        Returns:
-            dict: Stitched predictions {seg, hv}
+        NOTE: This is now only used for creating visualization masks.
+        Instance extraction happens per-tile in the new approach.
         """
         h, w = image_shape[:2]
         tile_weights = self.create_tile_weights()
@@ -285,7 +340,7 @@ class TileProcessor:
         
         # Blend all tiles
         for idx, (pred, (y1, x1, y2, x2)) in enumerate(zip(tiles_preds, positions)):
-            # **NEW: Skip filtered tiles**
+            # Skip filtered tiles
             if pred is None:
                 continue
             

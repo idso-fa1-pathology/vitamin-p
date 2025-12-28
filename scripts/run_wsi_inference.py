@@ -305,8 +305,18 @@ def main():
         args.device = 'cpu'
     
     # Load model
+    # Load model
     try:
         model = load_model(args)
+        
+        # Load checkpoint and move to device
+        logger.info(f"Loading checkpoint: {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=args.device)
+        model.load_state_dict(checkpoint)
+        model = model.to(args.device)
+        model.eval()
+        logger.info(f"✓ Model loaded and moved to {args.device}")
+        
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         sys.exit(1)
@@ -324,14 +334,13 @@ def main():
             model=model,
             checkpoint_path=args.checkpoint,
             device=args.device,
-            batch_size=args.batch_size,
             patch_size=args.patch_size,
             overlap=args.overlap,
             target_mpp=args.target_mpp,
             magnification=args.magnification,
             mixed_precision=args.mixed_precision,
-            num_workers=args.num_workers,
             logger=logger,
+            tissue_dilation=1,
         )
     except Exception as e:
         logger.error(f"Failed to create predictor: {e}")
@@ -364,20 +373,37 @@ def main():
             logger.info(f"Results saved to: {args.output_dir}")
             
         else:
-            # Multiple WSIs
-            all_results = predictor.predict_batch(
-                wsi_paths=wsi_paths,
-                output_dir=args.output_dir,
-                branch=args.branch,
-                wsi_properties=wsi_properties,
-                filter_tissue=args.filter_tissue,
-                tissue_threshold=args.tissue_threshold,
-                clean_overlaps=not args.no_overlap_cleaning,
-                iou_threshold=args.iou_threshold,
-                save_heatmap=args.save_heatmap,
-                save_json=True,
-                save_csv=args.save_csv,
-            )
+            # Multiple WSIs - loop through them
+            all_results = {}
+            
+            for wsi_path in wsi_paths:
+                wsi_name = wsi_path.stem
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Processing: {wsi_name}")
+                logger.info(f"{'='*60}")
+                
+                try:
+                    # Create output dir for this WSI
+                    wsi_output_dir = Path(args.output_dir) / wsi_name
+                    
+                    result = predictor.predict(
+                        wsi_path=wsi_path,
+                        output_dir=str(wsi_output_dir),
+                        branch=args.branch,
+                        wsi_properties=wsi_properties,
+                        filter_tissue=args.filter_tissue,
+                        tissue_threshold=args.tissue_threshold,
+                        clean_overlaps=not args.no_overlap_cleaning,
+                        iou_threshold=args.iou_threshold,
+                        save_heatmap=args.save_heatmap,
+                        save_json=True,
+                        save_csv=args.save_csv,
+                    )
+                    all_results[wsi_name] = result
+                    
+                except Exception as e:
+                    logger.error(f"Failed to process {wsi_name}: {e}", exc_info=True)
+                    all_results[wsi_name] = {'error': str(e)}
             
             # Summary
             logger.info("\n" + "="*60)
@@ -401,8 +427,7 @@ def main():
             logger.info(f"Branch: {args.branch}")
             logger.info(f"Total detections: {total_detections}")
             logger.info(f"Total time: {total_time:.2f}s")
-            logger.info(f"Results saved to: {args.output_dir}")
-        
+            logger.info(f"Results saved to: {args.output_dir}")     
         return 0
         
     except Exception as e:

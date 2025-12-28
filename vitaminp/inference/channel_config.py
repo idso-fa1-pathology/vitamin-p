@@ -5,7 +5,7 @@ Channel Configuration for MIF Images
 Professional channel specification system
 """
 
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union  # ← ADD Union HERE
 from dataclasses import dataclass
 import numpy as np
 
@@ -29,7 +29,7 @@ class ChannelConfig:
         )
     """
     nuclear_channel: int
-    membrane_channel: Optional[int | List[int]] = None
+    membrane_channel: Optional[Union[int, List[int]]] = None  # ← CHANGE THIS LINE
     membrane_combination: str = 'max'  # 'max', 'sum', 'mean'
     channel_names: Optional[Dict[int, str]] = None
     

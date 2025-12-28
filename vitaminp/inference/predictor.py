@@ -61,6 +61,7 @@ class WSIPredictor:
         mixed_precision=False,
         logger=None,
         mif_channel_config=None,
+        tissue_dilation=1,  # 🔥 ADD THIS
     ):
         """Initialize WSI Predictor
         
@@ -84,6 +85,7 @@ class WSIPredictor:
         self.target_mpp = target_mpp
         self.magnification = magnification
         self.mixed_precision = mixed_precision
+        self.tissue_dilation = tissue_dilation  # 🔥 ADD THIS
         
         # Setup logger
         if logger is None:
@@ -249,7 +251,8 @@ class WSIPredictor:
             tiles, positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles(
                 image,
                 filter_tissue=filter_tissue,
-                tissue_threshold=tissue_threshold
+                tissue_threshold=tissue_threshold,
+                tissue_dilation=self.tissue_dilation  # 🔥 ADD THIS
             )
             wsi_reader = None
             image_shape = image.shape
@@ -263,7 +266,8 @@ class WSIPredictor:
             positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
                 wsi_reader,
                 filter_tissue=filter_tissue,
-                tissue_threshold=tissue_threshold
+                tissue_threshold=tissue_threshold,
+                tissue_dilation=self.tissue_dilation  # 🔥 ADD THIS
             )
             tiles = None  # Will be loaded on-demand during inference
             image_shape = (wsi_reader.height, wsi_reader.width, 3)

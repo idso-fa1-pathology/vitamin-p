@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-dual-small-fold1
+  name: vitamin-p-inference-he-2014-0938
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -24,29 +24,38 @@ spec:
           persistentVolumeClaim:
             claimName: yshokrollahi-gpu-rsrch9-home-plm
       containers:
-        - name: training-container
+        - name: inference-container
           image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
           command: 
             - "python"
-            - "scripts/train.py"
-            - "--model"
-            - "dual"      # Model type: dual, flex, baseline_he, baseline_mif
-            - "--size"
-            - "small"             # Model size: small, base, large, giant
-            - "--fold"
-            - "1"                # Fold: 1, 2, 3, 4, 5
-            - "--epochs"
-            - "250"
-            - "--wandb-project"
-            - "vitamin-p"
+            - "scripts/run_wsi_inference.py"
+            - "--model_type"
+            - "flex"
+            - "--model_size"
+            - "large"
+            - "--checkpoint"
+            - "checkpoints/vitamin_p_flex_large_fold2_best.pth"
+            - "--wsi_folder"
+            - "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 1/Images/H&Es"
+            - "--wsi_extension"
+            - "svs"
+            - "--output_dir"
+            - "inference_results/2014-0938-he-slides"
+            - "--branch"
+            - "he_nuclei"
+            - "--device"
+            - "cuda"
+            - "--patch_size"
+            - "512"
+            - "--overlap"
+            - "64"
+            - "--magnification"
+            - "40"
+            - "--filter_tissue"
+            - "--tissue_threshold"
+            - "0.1"
           workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
           env:
-            - name: WANDB_API_KEY
-              value: "979fc21fe6b28c4e4a4503f7e421bfc270a4300c"
-            - name: WANDB_PROJECT
-              value: "vitamin-p"
-            - name: WANDB_MODE
-              value: "online"
             - name: HOME
               value: /tmp
             - name: PYTHONPATH
@@ -58,7 +67,7 @@ spec:
               mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
           resources:
             limits:
-              nvidia.com/gpu: "2"
-              cpu: "60"
-              memory: "700Gi"
+              nvidia.com/gpu: "1"
+              cpu: "30"
+              memory: "350Gi"
       restartPolicy: Never

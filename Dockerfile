@@ -86,9 +86,13 @@ RUN pip install --no-cache-dir \
     torchvision==0.16.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
+# 🔥 Install CuPy for GPU-accelerated post-processing (CUDA 12.1)
+RUN pip install --no-cache-dir cupy-cuda12x
+
 RUN pip install --no-cache-dir \
     wandb \
     timm
+
 # Install additional ML/DL packages
 RUN pip install --no-cache-dir \
     clip-anytorch==2.6.0 \
@@ -109,19 +113,31 @@ RUN chmod -R 777 /Data
 WORKDIR /workspace
 RUN chmod -R 777 /workspace
 
-# Copy project files - UPDATED TO INCLUDE ALL PACKAGES
-COPY crc_dataset/ /workspace/crc_dataset/
-COPY metrics/ /workspace/metrics/
-COPY models/ /workspace/models/
-COPY postprocessing/ /workspace/postprocessing/
-COPY inference/ /workspace/inference/
-COPY main.py /workspace/
-COPY inference.py /workspace/
-COPY config.yaml /workspace/
-COPY README.md /workspace/
+# Copy vitaminp package (main package with all modules)
+COPY vitaminp/ /workspace/vitaminp/
 
-# Create necessary directories for vitamin-p
-RUN mkdir -p /workspace/checkpoints /workspace/cache /workspace/metrics /workspace/outputs && \
+# Copy scripts (training and inference scripts)
+COPY scripts/ /workspace/scripts/
+
+# Copy dataset folder if needed
+COPY dataset/ /workspace/dataset/
+
+# Copy configuration files
+COPY configs/ /workspace/configs/
+
+# Copy additional files
+COPY setup.py /workspace/
+COPY requirements.txt /workspace/
+COPY README.md /workspace/
+COPY LICENSE /workspace/
+
+# Create necessary directories
+RUN mkdir -p /workspace/checkpoints \
+             /workspace/cache \
+             /workspace/output \
+             /workspace/inference_results \
+             /workspace/results \
+             /workspace/test_images && \
     chmod -R 777 /workspace
 
 # Set Python path

@@ -33,19 +33,22 @@ class TileProcessor:
         self.stride = tile_size - overlap
         self.wsi_reader = None 
         
-    def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1):
+    def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1):
         """Extract tiles on-demand from WSI reader without loading full image (NEW)
         
         Args:
             wsi_reader: WSIReader object with .read_region() method
             filter_tissue: Whether to filter tiles by tissue content
             tissue_threshold: Minimum tissue percentage (0-1) for a tile to be processed
+            tissue_dilation: Number of tiles to dilate tissue regions (0=no dilation, 1=dilate by 1 tile)
             
         Returns:
             positions: List of (y1, x1, y2, x2) positions
             grid_shape: (n_tiles_h, n_tiles_w)
             tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
         """
+        import cv2  # Add import at top of method
+        
         h, w = wsi_reader.height, wsi_reader.width
         self.wsi_reader = wsi_reader  # Store for later tile reading
         
@@ -84,8 +87,29 @@ class TileProcessor:
                 
                 positions.append((y1, x1, y2, x2))
         
-        return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
+        # 🔥 NEW: Apply morphological dilation to tissue mask
+        if filter_tissue and tissue_dilation > 0:
+            # Reshape to 2D grid
+            tile_mask_2d = np.array(tile_mask, dtype=np.uint8).reshape(n_tiles_h, n_tiles_w)
+            
+            # Create dilation kernel (3x3 dilates by 1 tile, 5x5 by 2 tiles, etc.)
+            kernel_size = 2 * tissue_dilation + 1
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            
+            # Dilate tissue regions
+            tile_mask_dilated = cv2.dilate(tile_mask_2d, kernel, iterations=1)
+            
+            # Flatten back to list
+            tile_mask = tile_mask_dilated.flatten().tolist()
+            
+            # Log the improvement
+            n_original = sum(np.array(tile_mask_2d).flatten())
+            n_dilated = sum(tile_mask)
+            print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
         
+        return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
+
+
     def read_tile(self, position):
         """Read a single tile from WSI reader (NEW)
         
@@ -111,11 +135,13 @@ class TileProcessor:
         
         return tile
     
-    def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1):
+    def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1):
         """Extract overlapping tiles from loaded image (LEGACY - for compatibility)
         
         This method loads the full image. For streaming, use extract_tiles_streaming().
         """
+        import cv2  # Add import
+        
         h, w = image.shape[:2]
         tiles = []
         positions = []
@@ -163,8 +189,32 @@ class TileProcessor:
                 tiles.append(tile)
                 positions.append((y1, x1, y2, x2))
         
+        # 🔥 NEW: Apply morphological dilation to tissue mask (same as streaming version)
+        if filter_tissue and tissue_dilation > 0:
+            tile_mask_2d = np.array(tile_mask, dtype=np.uint8).reshape(n_tiles_h, n_tiles_w)
+            kernel_size = 2 * tissue_dilation + 1
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            tile_mask_dilated = cv2.dilate(tile_mask_2d, kernel, iterations=1)
+            
+            # Update tile_mask and tiles list
+            tile_mask_new = tile_mask_dilated.flatten().tolist()
+            
+            # Add None tiles that were dilated in
+            tiles_updated = []
+            for idx, (old_mask, new_mask) in enumerate(zip(tile_mask, tile_mask_new)):
+                if old_mask:
+                    tiles_updated.append(tiles[sum(tile_mask[:idx])])
+                elif new_mask:  # Newly included by dilation
+                    tiles_updated.append(None)  # Will be loaded later
+                
+            tiles = tiles_updated
+            tile_mask = tile_mask_new
+            
+            n_original = sum(np.array(tile_mask_2d).flatten())
+            n_dilated = sum(tile_mask)
+            print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
+        
         return tiles, positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
-
 
     def _calculate_tissue_percentage(self, tile):
         """Calculate percentage of tissue in a tile using Otsu thresholding

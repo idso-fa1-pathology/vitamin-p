@@ -112,9 +112,11 @@ class VitaminPTrainer:
         self.best_val_loss = float('inf')
     
     def _detect_model_type(self, model):
-        """Detect model type: Dual, Flex, BaselineHE, or BaselineMIF"""
+        """Detect model type: Dual, Syn, Flex, BaselineHE, or BaselineMIF"""
         model_class_name = model.__class__.__name__
-        if 'Dual' in model_class_name:
+        if 'Syn' in model_class_name:
+            return 'Syn'
+        elif 'Dual' in model_class_name:
             return 'Dual'
         elif 'Flex' in model_class_name:
             return 'Flex'
@@ -127,7 +129,9 @@ class VitaminPTrainer:
     
     def _get_architecture_description(self):
         """Get architecture description based on model type"""
-        if self.model_type == 'Dual':
+        if self.model_type == 'Syn':
+            return "Dual-Encoder with Mid-Fusion (Synthetic MIF)"
+        elif self.model_type == 'Dual':
             return "Dual-Encoder with Mid-Fusion"
         elif self.model_type == 'Flex':
             return "Shared Encoder → 4 Separate Decoders"
@@ -259,6 +263,7 @@ class VitaminPTrainer:
             metrics[key] /= n_batches
         
         return metrics
+
     def train_epoch_flex(self, use_augmentations=True):
         """Train one epoch for VitaminPFlex (single-encoder with random modality)"""
         self.model.train()
@@ -671,7 +676,7 @@ class VitaminPTrainer:
 
     def train_epoch(self, use_augmentations=True):
         """Route to appropriate training function based on model type"""
-        if self.model_type == 'Dual':
+        if self.model_type == 'Dual' or self.model_type == 'Syn':
             return self.train_epoch_dual(use_augmentations)
         elif self.model_type == 'Flex':
             return self.train_epoch_flex(use_augmentations)
@@ -699,7 +704,7 @@ class VitaminPTrainer:
             'mif_cell_hv_std': 0,
         }
         
-        if self.model_type == 'Dual':
+        if self.model_type == 'Dual' or self.model_type == 'Syn':
             # Dual model validation
             for batch in self.val_loader:
                 he_img = batch['he_image'].to(self.device)

@@ -344,7 +344,7 @@ class CRCCachedDataset(CRCZarrDataset):
             data = self.cache[idx]
             
             # Apply augmentation if training (must be done per-access, not cached)
-            if self.augment is not None:
+            if self.augment is not None and self.training:
                 (he_img, mif_img, he_nuclei_mask, he_cell_mask,
                  mif_nuclei_mask, mif_cell_mask, he_nuclei_hv, he_cell_hv,
                  mif_nuclei_hv, mif_cell_hv) = self.augment(

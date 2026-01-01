@@ -1,7 +1,7 @@
 """
 Vitamin-P: DINOv2 U-Net models for H&E + MIF Pathology Images
 """
-from .models import VitaminPDual, VitaminPFlex, VitaminPBaselineHE, VitaminPBaselineMIF
+from .models import VitaminPDual, VitaminPSyn, VitaminPFlex, VitaminPBaselineHE, VitaminPBaselineMIF
 from .trainer import VitaminPTrainer
 from .losses import DiceFocalLoss, HVLoss, MSGELossMaps
 from .backbone import DINOv2Backbone
@@ -12,6 +12,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     'VitaminPDual',
+    'VitaminPSyn',
     'VitaminPFlex',
     'VitaminPBaselineHE',
     'VitaminPBaselineMIF',

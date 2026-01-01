@@ -2,6 +2,7 @@
 Training script for Kubernetes job submission
 Usage: 
     python scripts/train.py --model dual --size base --fold 1
+    python scripts/train.py --model syn --size base --fold 1
     python scripts/train.py --model flex --size large --fold 2
     python scripts/train.py --model baseline_he --size base --fold 1
     python scripts/train.py --model baseline_mif --size base --fold 1
@@ -16,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dataset import Config, create_dataloaders
-from vitaminp import VitaminPDual, VitaminPFlex, VitaminPBaselineHE, VitaminPBaselineMIF, VitaminPTrainer
+from vitaminp import VitaminPDual, VitaminPSyn, VitaminPFlex, VitaminPBaselineHE, VitaminPBaselineMIF, VitaminPTrainer
 
 
 def main():
@@ -24,8 +25,8 @@ def main():
     
     # Model selection
     parser.add_argument('--model', type=str, required=True,
-                       choices=['dual', 'flex', 'baseline_he', 'baseline_mif'],
-                       help='Model type: dual (Dual-Encoder), flex (Single-Encoder), baseline_he (H&E-only), baseline_mif (MIF-only)')
+                       choices=['dual', 'syn', 'flex', 'baseline_he', 'baseline_mif'],
+                       help='Model type: dual (Dual-Encoder), syn (Dual-Encoder with Synthetic MIF), flex (Single-Encoder), baseline_he (H&E-only), baseline_mif (MIF-only)')
     
     # Model configuration
     parser.add_argument('--size', type=str, default='base',
@@ -37,7 +38,7 @@ def main():
                        help='Fold number (1-5)')
     
     parser.add_argument('--dropout', type=float, default=0.3,
-                       help='Dropout rate (for dual and baseline models)')
+                       help='Dropout rate (for dual, syn, and baseline models)')
     
     # Training configuration
     parser.add_argument('--epochs', type=int, default=250,
@@ -114,7 +115,7 @@ def main():
     print(f"Initializing VitaminP{args.model.replace('_', ' ').title()} Model")
     print(f"{'='*80}")
     print(f"Model size: {args.size.upper()}")
-    if args.model in ['dual', 'baseline_he', 'baseline_mif']:
+    if args.model in ['dual', 'syn', 'baseline_he', 'baseline_mif']:
         print(f"Dropout rate: {args.dropout}")
     print(f"Freeze backbone: {args.freeze_backbone}")
     print(f"{'='*80}\n")
@@ -122,6 +123,12 @@ def main():
     try:
         if args.model == 'dual':
             model = VitaminPDual(
+                model_size=args.size,
+                dropout_rate=args.dropout,
+                freeze_backbone=args.freeze_backbone
+            )
+        elif args.model == 'syn':
+            model = VitaminPSyn(
                 model_size=args.size,
                 dropout_rate=args.dropout,
                 freeze_backbone=args.freeze_backbone

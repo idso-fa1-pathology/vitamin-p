@@ -288,6 +288,15 @@ class WSIPredictor:
         # Detect if this is a MIF branch
         is_mif_branch = 'mif' in branch.lower()
         
+        # 🔥 NEW: Use MIF predictions for H&E branches (better quality)
+        # 🔥 NEW: Use MIF predictions for H&E branches in DUAL models only (better quality)
+        use_mif_for_he = False
+        actual_branch = branch
+        
+        if self.is_dual_model and not is_mif_branch and wsi_path_mif is not None:
+            use_mif_for_he = True
+            actual_branch = branch.replace('he_', 'mif_')
+            self.logger.info(f"🔄 Using MIF predictions for {branch} (better quality)")
         # Auto-detect MPP from WSI metadata
         mpp = mpp_override if mpp_override is not None else self.target_mpp
         detected_mag = None
@@ -495,7 +504,7 @@ class WSIPredictor:
                     pred = self._predict_tile(
                         tile_he=tile_he,
                         tile_mif=tile_mif,
-                        branch=branch,
+                        branch=actual_branch,  # 🔥 Changed
                         is_mif=is_mif_branch
                     )
                 else:

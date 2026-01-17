@@ -181,24 +181,70 @@ class MultiFormatImageLoader:
 
     @staticmethod
     def load_mif_image(image_path, channel_config=None):
-        """Load MIF image with channel selection (LEGACY - loads full image)
+        """Load MIF image with channel configuration (supports PNG and TIFF)
         
         Args:
-            image_path: Path to MIF OME-TIFF file
-            channel_config: ChannelConfig instance or None (uses first 2 channels)
+            image_path: Path to MIF image (PNG or TIFF)
+            channel_config: ChannelConfig object for channel processing
             
         Returns:
-            numpy.ndarray: 2-channel image (2, H, W), float32, normalized to 0-1
+            numpy array: MIF image with shape (C, H, W) where C=2 (nuclear, membrane)
         """
+        import cv2
+        
         image_path = Path(image_path)
         
         if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
         
-        # Load MIF with tifffile
-        import tifffile
-        mif_array = tifffile.imread(str(image_path))
+        # Detect file format
+        file_ext = image_path.suffix.lower()
         
+        if file_ext in ['.png', '.jpg', '.jpeg']:
+            # Load PNG/JPG with OpenCV
+            mif_array = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            
+            if mif_array is None:
+                raise ValueError(f"Failed to load image: {image_path}")
+            
+            # Convert BGR to RGB if needed
+            if len(mif_array.shape) == 3 and mif_array.shape[2] == 3:
+                mif_array = cv2.cvtColor(mif_array, cv2.COLOR_BGR2RGB)
+            
+            # Convert to float32 and normalize to [0, 1]
+            if mif_array.dtype == np.uint8:
+                mif_array = mif_array.astype(np.float32) / 255.0
+            elif mif_array.dtype == np.uint16:
+                mif_array = mif_array.astype(np.float32) / 65535.0
+            
+            # Convert from (H, W, C) to (C, H, W) if needed
+            if len(mif_array.shape) == 3:
+                mif_array = np.transpose(mif_array, (2, 0, 1))
+            elif len(mif_array.shape) == 2:
+                # Grayscale - add channel dimension
+                mif_array = mif_array[np.newaxis, :, :]
+        
+        elif file_ext in ['.tif', '.tiff']:
+            # Load TIFF with tifffile
+            import tifffile
+            mif_array = tifffile.imread(str(image_path))
+            
+            # Ensure float32 and normalize
+            if mif_array.dtype == np.uint8:
+                mif_array = mif_array.astype(np.float32) / 255.0
+            elif mif_array.dtype == np.uint16:
+                mif_array = mif_array.astype(np.float32) / 65535.0
+            
+            # Handle different TIFF shapes
+            if len(mif_array.shape) == 2:
+                mif_array = mif_array[np.newaxis, :, :]
+            elif len(mif_array.shape) == 3:
+                # Check if it's (H, W, C) and convert to (C, H, W)
+                if mif_array.shape[2] < mif_array.shape[0]:
+                    mif_array = np.transpose(mif_array, (2, 0, 1))
+        
+        else:
+            raise ValueError(f"Unsupported file format: {file_ext}. Use PNG, JPEG, or TIFF.")
         
         # Apply channel configuration
         if channel_config is not None:
@@ -213,19 +259,9 @@ class MultiFormatImageLoader:
                     f"Please provide channel_config."
                 )
         
-        # Normalize to 0-1 (handle 16-bit)
-        if mif_2ch.dtype == np.uint16:
-            mif_2ch = mif_2ch.astype(np.float32) / 65535.0
-        elif mif_2ch.dtype == np.uint8:
-            mif_2ch = mif_2ch.astype(np.float32) / 255.0
-        else:
-            mif_2ch = mif_2ch.astype(np.float32)
-        
         print(f"Output: shape={mif_2ch.shape}, dtype={mif_2ch.dtype}, range=[{mif_2ch.min():.3f}, {mif_2ch.max():.3f}]")
         
         return mif_2ch
-
-
 # NEW: Reader classes for streaming tile access
 
 class OpenSlideReader:

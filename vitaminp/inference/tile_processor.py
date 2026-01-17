@@ -33,7 +33,8 @@ class TileProcessor:
         self.stride = tile_size - overlap
         self.wsi_reader = None 
         
-    def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1):
+
+    def extract_tiles_streaming(self, wsi_reader, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1, scale_factor=1.0):
         """Extract tiles on-demand from WSI reader without loading full image (NEW)
         
         Args:
@@ -41,100 +42,143 @@ class TileProcessor:
             filter_tissue: Whether to filter tiles by tissue content
             tissue_threshold: Minimum tissue percentage (0-1) for a tile to be processed
             tissue_dilation: Number of tiles to dilate tissue regions (0=no dilation, 1=dilate by 1 tile)
+            scale_factor: Scale factor for resolution matching (tiles extracted from upscaled space)
             
         Returns:
-            positions: List of (y1, x1, y2, x2) positions
+            positions: List of (y1, x1, y2, x2) positions IN ORIGINAL WSI SPACE
             grid_shape: (n_tiles_h, n_tiles_w)
             tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
         """
-        import cv2  # Add import at top of method
+        import cv2
         
-        h, w = wsi_reader.height, wsi_reader.width
-        self.wsi_reader = wsi_reader  # Store for later tile reading
+        # Original WSI dimensions
+        h_original = wsi_reader.height
+        w_original = wsi_reader.width
+        
+        # Virtual upscaled dimensions
+        h_upscaled = int(h_original * scale_factor)
+        w_upscaled = int(w_original * scale_factor)
+        
+        self.wsi_reader = wsi_reader
+        self.scale_factor = scale_factor  # Store for tile reading
         
         positions = []
         tile_mask = []
         
-        # Calculate number of tiles needed
-        n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
-        n_tiles_w = int(np.ceil((w - self.overlap) / self.stride))
+        # Calculate number of tiles needed IN UPSCALED SPACE
+        n_tiles_h = int(np.ceil((h_upscaled - self.overlap) / self.stride))
+        n_tiles_w = int(np.ceil((w_upscaled - self.overlap) / self.stride))
         
+        print(f"   Virtual upscaled size: {h_upscaled}x{w_upscaled} (from {h_original}x{w_original})")
         print(f"   Scanning {n_tiles_h}x{n_tiles_w} tile grid...")
         
         for i in range(n_tiles_h):
             for j in range(n_tiles_w):
-                # Calculate tile position
-                y1 = i * self.stride
-                x1 = j * self.stride
-                y2 = min(y1 + self.tile_size, h)
-                x2 = min(x1 + self.tile_size, w)
+                # Calculate tile position IN UPSCALED SPACE
+                y1_up = i * self.stride
+                x1_up = j * self.stride
+                y2_up = min(y1_up + self.tile_size, h_upscaled)
+                x2_up = min(x1_up + self.tile_size, w_upscaled)
                 
                 # Adjust if we hit the edge
-                if y2 - y1 < self.tile_size:
-                    y1 = max(0, y2 - self.tile_size)
-                if x2 - x1 < self.tile_size:
-                    x1 = max(0, x2 - self.tile_size)
+                if y2_up - y1_up < self.tile_size:
+                    y1_up = max(0, y2_up - self.tile_size)
+                if x2_up - x1_up < self.tile_size:
+                    x1_up = max(0, x2_up - self.tile_size)
                 
-                # Tissue filtering
+                # Convert to ORIGINAL WSI SPACE for storage
+                y1_orig = int(y1_up / scale_factor)
+                x1_orig = int(x1_up / scale_factor)
+                y2_orig = int(y2_up / scale_factor)
+                x2_orig = int(x2_up / scale_factor)
+                
+                # Tissue filtering (read from original space, upscale, then check)
                 if filter_tissue:
-                    # Read tile on-demand for tissue detection
-                    tile = wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
-                    tissue_pct = self._calculate_tissue_percentage(tile)
+                    # Read small region from original WSI
+                    tile_small = wsi_reader.read_region((x1_orig, y1_orig), (x2_orig-x1_orig, y2_orig-y1_orig))
+                    # Upscale to 512x512
+                    tile_upscaled = cv2.resize(tile_small, (self.tile_size, self.tile_size), interpolation=cv2.INTER_LINEAR)
+                    tissue_pct = self._calculate_tissue_percentage(tile_upscaled)
                     has_tissue = tissue_pct >= tissue_threshold
                     tile_mask.append(has_tissue)
                 else:
                     tile_mask.append(True)
                 
-                positions.append((y1, x1, y2, x2))
+                # Store ORIGINAL space coordinates
+                positions.append((y1_orig, x1_orig, y2_orig, x2_orig))
         
-        # 🔥 NEW: Apply morphological dilation to tissue mask
+        # Apply morphological dilation to tissue mask
         if filter_tissue and tissue_dilation > 0:
-            # Reshape to 2D grid
             tile_mask_2d = np.array(tile_mask, dtype=np.uint8).reshape(n_tiles_h, n_tiles_w)
-            
-            # Create dilation kernel (3x3 dilates by 1 tile, 5x5 by 2 tiles, etc.)
             kernel_size = 2 * tissue_dilation + 1
             kernel = np.ones((kernel_size, kernel_size), np.uint8)
-            
-            # Dilate tissue regions
             tile_mask_dilated = cv2.dilate(tile_mask_2d, kernel, iterations=1)
-            
-            # Flatten back to list
             tile_mask = tile_mask_dilated.flatten().tolist()
             
-            # Log the improvement
             n_original = sum(np.array(tile_mask_2d).flatten())
             n_dilated = sum(tile_mask)
             print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
         
         return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
 
-
     def read_tile(self, position):
-        """Read a single tile from WSI reader (NEW)
+        """Read a single tile from WSI reader and upscale to tile_size
         
         Args:
-            position: (y1, x1, y2, x2) tile position
+            position: (y1, x1, y2, x2) tile position IN ORIGINAL WSI SPACE
             
         Returns:
-            numpy array (tile_size, tile_size, 3), padded if needed
+            numpy array (tile_size, tile_size, 3) - upscaled to match training resolution
         """
+        import cv2
+        
         if self.wsi_reader is None:
             raise ValueError("No WSI reader available. Call extract_tiles_streaming first.")
         
         y1, x1, y2, x2 = position
         
-        # Read region
+        # Read region from ORIGINAL WSI
         tile = self.wsi_reader.read_region((x1, y1), (x2-x1, y2-y1))
         
-        # Pad if needed (edge tiles)
-        if tile.shape[0] < self.tile_size or tile.shape[1] < self.tile_size:
-            padded = np.zeros((self.tile_size, self.tile_size, tile.shape[2]), dtype=tile.dtype)
-            padded[:tile.shape[0], :tile.shape[1]] = tile
-            tile = padded
+        # Upscale to tile_size (512x512)
+        if tile.shape[0] != self.tile_size or tile.shape[1] != self.tile_size:
+            tile = cv2.resize(tile, (self.tile_size, self.tile_size), interpolation=cv2.INTER_LINEAR)
         
         return tile
-    
+
+    def read_tile_mif(self, position):
+        """Read a single MIF tile at the same position as H&E tile
+        
+        This method reads from the stored MIF image at the exact same position
+        as the H&E tile to ensure perfect alignment, and applies channel processing.
+        
+        Args:
+            position: (y1, x1, y2, x2) tile position IN ORIGINAL WSI SPACE
+            
+        Returns:
+            numpy array (tile_size, tile_size, 2) - MIF tile with 2 channels (nuclear, membrane)
+        """
+        import cv2
+        
+        if not hasattr(self, 'mif_image') or self.mif_image is None:
+            raise ValueError("No MIF image available. Ensure mif_image is set before calling read_tile_mif().")
+        
+        y1, x1, y2, x2 = position
+        
+        # Extract tile from full MIF image - shape is (H, W, 2) since it's already processed
+        tile_mif = self.mif_image[y1:y2, x1:x2]
+        
+        # Upscale to tile_size (512x512) to match H&E tile
+        if tile_mif.shape[0] != self.tile_size or tile_mif.shape[1] != self.tile_size:
+            # Preserve number of channels during resize
+            tile_mif = cv2.resize(
+                tile_mif, 
+                (self.tile_size, self.tile_size), 
+                interpolation=cv2.INTER_LINEAR
+            )
+        
+        return tile_mif
+
     def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1):
         """Extract overlapping tiles from loaded image (LEGACY - for compatibility)
         
@@ -279,7 +323,8 @@ class TileProcessor:
         mpp=0.25,
         detection_threshold=0.5,
         min_area_um=None,
-        use_gpu=True
+        use_gpu=True,
+        scale_factor=1.0
     ):
         """Process a single tile to extract instances (CellViT style)
         
@@ -291,6 +336,7 @@ class TileProcessor:
             detection_threshold: Binary threshold
             min_area_um: Minimum area in μm²
             use_gpu: Use GPU for post-processing
+            scale_factor: Scale factor applied to tile before inference
             
         Returns:
             List of cell dictionaries with GLOBAL coordinates
@@ -299,7 +345,7 @@ class TileProcessor:
         
         y1, x1, y2, x2 = position
         
-        # Extract instances from THIS TILE ONLY (small 512x512)
+        # Extract instances from THIS TILE ONLY
         inst_map, inst_info, num_instances = process_model_outputs(
             seg_pred=tile_pred['seg'],
             h_map=tile_pred['hv'][0],
@@ -314,22 +360,31 @@ class TileProcessor:
         # Convert local coordinates to global coordinates
         cells_global = []
         for inst_id, cell_data in inst_info.items():
-            # Adjust coordinates from tile-local to WSI-global
+            # 🔥 STEP 3: Downscale coordinates back to original space
+            if scale_factor != 1.0:
+                bbox_local = cell_data['bbox'] / scale_factor
+                centroid_local = cell_data['centroid'] / scale_factor
+                contour_local = cell_data['contour'] / scale_factor
+            else:
+                bbox_local = cell_data['bbox']
+                centroid_local = cell_data['centroid']
+                contour_local = cell_data['contour']
+            
+            # Then adjust from tile-local to WSI-global
             cell_global = {
-                'bbox': (cell_data['bbox'] + np.array([[y1, x1], [y1, x1]])).tolist(),
-                'centroid': (cell_data['centroid'] + np.array([x1, y1])).tolist(),
-                'contour': (cell_data['contour'] + np.array([x1, y1])).tolist(),
+                'bbox': (bbox_local + np.array([[y1, x1], [y1, x1]])).astype(np.float32).tolist(),
+                'centroid': (centroid_local + np.array([x1, y1])).astype(np.float32).tolist(),
+                'contour': (contour_local + np.array([x1, y1])).astype(np.int32).tolist(),  # Convert to int32 for OpenCV
                 'type_prob': cell_data.get('type_prob'),
                 'type': cell_data.get('type'),
                 'area_pixels': cell_data.get('area_pixels'),
                 'area_um': cell_data.get('area_um'),
                 'patch_coordinates': position,
-                'edge_position': self._is_edge_cell(cell_data['bbox'], self.tile_size, margin=self.overlap//2),
+                'edge_position': self._is_edge_cell(bbox_local, self.tile_size, margin=self.overlap//2),
             }
             cells_global.append(cell_global)
         
         return cells_global
-
 
     def _is_edge_cell(self, bbox, patch_size, margin=32):
         """Check if a cell is near the edge of a tile

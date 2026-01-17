@@ -16,6 +16,7 @@ from .tile_processor import TileProcessor
 from .overlap_cleaner import OverlapCleaner
 from .utils import ResultExporter, setup_logger
 
+MODEL_TRAINING_MPP = 0.263  # Geometric mean of training MPPs (0.2125, 0.3250)
 
 class WSIPredictor:
     """High-level predictor for whole slide image inference
@@ -61,12 +62,12 @@ class WSIPredictor:
         mixed_precision=False,
         logger=None,
         mif_channel_config=None,
-        tissue_dilation=1,  # 🔥 ADD THIS
+        tissue_dilation=1,
     ):
         """Initialize WSI Predictor
         
         Args:
-            model: Loaded model instance
+            model: Loaded model instance (VitaminPFlex or VitaminPDual)
             checkpoint_path: Path to checkpoint (optional, for reference)
             device: Device for inference ('cuda' or 'cpu')
             patch_size: Tile size (must match training)
@@ -76,6 +77,7 @@ class WSIPredictor:
             mixed_precision: Use FP16 for inference
             logger: Logger instance (creates one if None)
             mif_channel_config: MIF channel configuration
+            tissue_dilation: Number of tiles to dilate tissue regions
         """
         self.model = model
         self.checkpoint_path = checkpoint_path
@@ -85,7 +87,14 @@ class WSIPredictor:
         self.target_mpp = target_mpp
         self.magnification = magnification
         self.mixed_precision = mixed_precision
-        self.tissue_dilation = tissue_dilation  # 🔥 ADD THIS
+        self.tissue_dilation = tissue_dilation
+        
+        # 🔥 FIXED: Detect if this is a dual model using correct attribute names
+        self.is_dual_model = (
+            hasattr(model, 'he_backbone') and 
+            hasattr(model, 'mif_backbone') and 
+            hasattr(model, 'shared_backbone')
+        )
         
         # Setup logger
         if logger is None:
@@ -107,6 +116,7 @@ class WSIPredictor:
         
         self.logger.info(f"WSIPredictor initialized:")
         self.logger.info(f"  Device: {device}")
+        self.logger.info(f"  Model type: {'VitaminPDual (dual-modality)' if self.is_dual_model else 'VitaminPFlex (single-modality)'}")
         self.logger.info(f"  Patch size: {patch_size}")
         self.logger.info(f"  Overlap: {overlap}")
         self.logger.info(f"  Magnification: {magnification}")
@@ -114,10 +124,10 @@ class WSIPredictor:
         if mif_channel_config is not None:
             self.logger.info(f"  MIF channels: {mif_channel_config.get_description()}")
 
-    
     def predict(
         self,
         wsi_path,
+        wsi_path_mif=None,  # 🔥 NEW: Path to co-registered MIF image
         output_dir='results',
         branch='he_nuclei',
         branches=None,
@@ -133,13 +143,28 @@ class WSIPredictor:
         save_heatmap=False,
         save_visualization=True,
         detection_threshold=0.5,
-        min_area_um=3.0,        # ← ADD THIS
-        mpp_override=None,      # ← ADD THIS (for expert users)
+        min_area_um=3.0,
+        mpp_override=None,
     ):
         """Run inference on WSI
         
         Args:
-            # ... existing args ...
+            wsi_path: Path to H&E WSI
+            wsi_path_mif: Path to co-registered MIF WSI (required for dual models)
+            output_dir: Output directory
+            branch: Single branch to process (ignored if branches is provided)
+            branches: List of branches to process (e.g., ['he_nuclei', 'mif_nuclei'])
+            wsi_properties: WSI metadata (optional)
+            filter_tissue: Filter tiles by tissue content
+            tissue_threshold: Minimum tissue percentage (0-1)
+            clean_overlaps: Remove overlapping instances
+            iou_threshold: IoU threshold for overlap removal
+            save_masks: Save binary masks
+            save_json: Save JSON results
+            save_geojson: Save GeoJSON results
+            save_csv: Save CSV results
+            save_heatmap: Save heatmap visualization
+            save_visualization: Save visualization with contours
             detection_threshold: Binary threshold for instance extraction (0.5-0.8)
             min_area_um: Minimum cell area in μm² (default 3.0 for nuclei, None to disable)
             mpp_override: Override auto-detected MPP (for files with bad/missing metadata)
@@ -148,6 +173,20 @@ class WSIPredictor:
             dict: Results with predictions, instances, timing
         """
         start_time = time.time()
+        
+        # 🔥 NEW: Validate dual model usage
+        if self.is_dual_model and wsi_path_mif is None:
+            raise ValueError(
+                "This is a dual model (VitaminPDual) which requires both H&E and MIF inputs. "
+                "Please provide wsi_path_mif parameter."
+            )
+        
+        if not self.is_dual_model and wsi_path_mif is not None:
+            self.logger.warning(
+                "wsi_path_mif provided but model is single-modality (VitaminPFlex). "
+                "MIF image will be ignored."
+            )
+            wsi_path_mif = None
         
         # Determine branches to process
         if branches is not None:
@@ -160,10 +199,24 @@ class WSIPredictor:
             if b not in self.SUPPORTED_BRANCHES:
                 raise ValueError(f"Unsupported branch: {b}. Choose from {list(self.SUPPORTED_BRANCHES.keys())}")
         
+        # 🔥 NEW: Validate dual model usage
+        if self.is_dual_model and wsi_path_mif is None:
+            raise ValueError(
+                "This is a dual model (VitaminPDual) which requires both H&E and MIF inputs. "
+                "Please provide wsi_path_mif parameter."
+            )
+
+        if not self.is_dual_model and wsi_path_mif is not None:
+            self.logger.warning(
+                "wsi_path_mif provided but model is single-modality (VitaminPFlex). "
+                "MIF image will be ignored."
+            )
+            wsi_path_mif = None
         # Process single or multiple branches
         if len(branch_list) == 1:
             return self._process_single_branch(
                 wsi_path=wsi_path,
+                wsi_path_mif=wsi_path_mif,  # 🔥 NEW: Pass MIF path
                 branch=branch_list[0],
                 output_dir=output_dir,
                 clean_overlaps=clean_overlaps,
@@ -176,8 +229,8 @@ class WSIPredictor:
                 filter_tissue=filter_tissue,
                 tissue_threshold=tissue_threshold,
                 detection_threshold=detection_threshold,
-                min_area_um=min_area_um,      # ← ADD THIS
-                mpp_override=mpp_override,    # ← ADD THIS
+                min_area_um=min_area_um,
+                mpp_override=mpp_override,
             )
         else:
             # Multiple branches
@@ -190,6 +243,7 @@ class WSIPredictor:
                 branch_output_dir = Path(output_dir) / b
                 results = self._process_single_branch(
                     wsi_path=wsi_path,
+                    wsi_path_mif=wsi_path_mif,  # 🔥 NEW: Pass MIF path
                     branch=b,
                     output_dir=str(branch_output_dir),
                     clean_overlaps=clean_overlaps,
@@ -202,16 +256,17 @@ class WSIPredictor:
                     filter_tissue=filter_tissue,
                     tissue_threshold=tissue_threshold,
                     detection_threshold=detection_threshold,
-                    min_area_um=min_area_um,      # ← ADD THIS
-                    mpp_override=mpp_override,    # ← ADD THIS
+                    min_area_um=min_area_um,
+                    mpp_override=mpp_override,
                 )
                 all_results[b] = results
             
             return all_results
-    
+
     def _process_single_branch(
         self,
         wsi_path,
+        wsi_path_mif,  # 🔥 NEW: MIF WSI path
         branch,
         output_dir,
         clean_overlaps,
@@ -224,19 +279,21 @@ class WSIPredictor:
         filter_tissue=False,
         tissue_threshold=0.1,
         detection_threshold=0.5,
-        min_area_um=3.0,        # ← ADD THIS
-        mpp_override=None,      # ← ADD THIS
+        min_area_um=3.0,
+        mpp_override=None,
     ):
         """Process a single branch with per-tile instance extraction (NEW ARCHITECTURE)"""
         start_time = time.time()
         
         # Detect if this is a MIF branch
-        is_mif = 'mif' in branch.lower()
+        is_mif_branch = 'mif' in branch.lower()
+        
         # Auto-detect MPP from WSI metadata
-        mpp = mpp_override if mpp_override is not None else self.target_mpp  # Start with override or default
+        mpp = mpp_override if mpp_override is not None else self.target_mpp
         detected_mag = None
         
-        if not is_mif and mpp_override is None:
+        # For H&E branches or single-modality models, detect MPP from H&E file
+        if not is_mif_branch and mpp_override is None:
             try:
                 # Try to detect from file metadata
                 temp_reader = self.wsi_handler.get_wsi_reader(wsi_path)
@@ -257,7 +314,14 @@ class WSIPredictor:
             if mpp_override is not None:
                 self.logger.info(f"   Manual MPP override: {mpp:.4f} μm/px")
             else:
-                self.logger.info(f"   Using default MPP: {mpp:.4f} μm/px (MIF mode)")
+                self.logger.info(f"   Using default MPP: {mpp:.4f} μm/px")
+        
+        # Calculate scale factor
+        scale_factor = mpp / MODEL_TRAINING_MPP
+        self.logger.info(f"🔍 Resolution matching:")
+        self.logger.info(f"   WSI MPP: {mpp:.4f} μm/px")
+        self.logger.info(f"   Model training MPP: {MODEL_TRAINING_MPP:.4f} μm/px")
+        self.logger.info(f"   Scale factor: {scale_factor:.2f}x")
         
         # Log filtering settings
         if min_area_um is not None:
@@ -269,12 +333,59 @@ class WSIPredictor:
         # Use detected magnification if available
         magnification_to_use = detected_mag if detected_mag is not None else self.magnification
 
-        # 1. Open WSI reader (streaming - no full loading!)
-        self.logger.info(f"📁 Opening WSI: {wsi_path}")
-        
-        if is_mif:
-            # MIF still needs full load (TODO: add MIF streaming support later)
-            image = self.wsi_handler.load_mif_image(wsi_path, self.mif_channel_config)
+        # ========================================================================
+        # 🔥 NEW: Dual model branch - load BOTH H&E and MIF
+        # ========================================================================
+        if self.is_dual_model:
+            self.logger.info(f"📁 Opening dual WSI pair:")
+            self.logger.info(f"   H&E: {wsi_path}")
+            self.logger.info(f"   MIF: {wsi_path_mif}")
+            
+            # Open H&E reader (streaming)
+            wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
+            self.logger.info(f"   ✓ H&E Size: {wsi_reader_he.width}x{wsi_reader_he.height} pixels")
+            
+            # Load MIF image (full load for now - TODO: add MIF streaming later)
+            image_mif = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
+            image_mif = np.transpose(image_mif, (1, 2, 0))
+            self.logger.info(f"   ✓ MIF Size: {image_mif.shape[0]}x{image_mif.shape[1]} pixels, {image_mif.shape[2]} channels")
+            
+            # Verify alignment
+            if wsi_reader_he.height != image_mif.shape[0] or wsi_reader_he.width != image_mif.shape[1]:
+                raise ValueError(
+                    f"H&E and MIF images are not aligned! "
+                    f"H&E: {wsi_reader_he.height}x{wsi_reader_he.width}, "
+                    f"MIF: {image_mif.shape[0]}x{image_mif.shape[1]}"
+                )
+            
+            # Extract tile positions (based on H&E)
+            self.logger.info(f"📐 Extracting tile positions...")
+            positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
+                wsi_reader_he,
+                filter_tissue=filter_tissue,
+                tissue_threshold=tissue_threshold,
+                tissue_dilation=self.tissue_dilation,
+                scale_factor=scale_factor
+            )
+            
+            # Store MIF image in tile processor for aligned extraction
+            self.tile_processor.mif_image = image_mif
+            
+            wsi_reader = wsi_reader_he
+            image_shape = (wsi_reader_he.height, wsi_reader_he.width, 3)
+            image = None
+            tiles = None
+            
+        # ========================================================================
+        # Single-modality models (existing logic)
+        # ========================================================================
+        elif is_mif_branch:
+            # MIF branch with single-modality model
+            self.logger.info(f"📁 Opening MIF WSI: {wsi_path_mif if wsi_path_mif else wsi_path}")
+            image = self.wsi_handler.load_mif_image(
+                wsi_path_mif if wsi_path_mif else wsi_path, 
+                self.mif_channel_config
+            )
             image = np.transpose(image, (1, 2, 0))
             self.logger.info(f"   ✓ MIF Size: {image.shape[0]}x{image.shape[1]} pixels, {image.shape[2]} channels")
             
@@ -284,26 +395,29 @@ class WSIPredictor:
                 image,
                 filter_tissue=filter_tissue,
                 tissue_threshold=tissue_threshold,
-                tissue_dilation=self.tissue_dilation  # 🔥 ADD THIS
+                tissue_dilation=self.tissue_dilation
             )
             wsi_reader = None
             image_shape = image.shape
+            
         else:
-            # H&E: Use streaming approach (no full image loading!)
+            # H&E branch with single-modality model
+            self.logger.info(f"📁 Opening H&E WSI: {wsi_path}")
             wsi_reader = self.wsi_handler.get_wsi_reader(wsi_path)
             self.logger.info(f"   ✓ Size: {wsi_reader.width}x{wsi_reader.height} pixels")
             
-            # 2. Extract tile positions only (no actual tiles loaded yet!)
+            # Extract tile positions only (streaming)
             self.logger.info(f"📐 Extracting tile positions...")
             positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
                 wsi_reader,
                 filter_tissue=filter_tissue,
                 tissue_threshold=tissue_threshold,
-                tissue_dilation=self.tissue_dilation  # 🔥 ADD THIS
+                tissue_dilation=self.tissue_dilation,
+                scale_factor=scale_factor
             )
-            tiles = None  # Will be loaded on-demand during inference
+            tiles = None
             image_shape = (wsi_reader.height, wsi_reader.width, 3)
-            image = None  # Not loaded
+            image = None
 
         # Count tissue tiles
         if tile_mask is not None:
@@ -315,15 +429,15 @@ class WSIPredictor:
             self.logger.info(f"   ✓ Created {len(positions)} tiles ({n_h}x{n_w} grid)")
         
         # ========================================================================
-        # 🔥 NEW ARCHITECTURE: Process tiles and extract instances IMMEDIATELY
+        # Process tiles and extract instances
         # ========================================================================
         self.logger.info(f"🧠 Running predictions and extracting instances on {branch}...")
         
-        all_cells = []  # Collect all cells from all tiles
-        tiles_preds_for_viz = []  # Only for visualization (optional)
+        all_cells = []
+        tiles_preds_for_viz = []
         
         if tiles is not None:
-            # MIF path - tiles already loaded
+            # MIF path - tiles already loaded (single-modality)
             for idx, tile in enumerate(tqdm(positions, desc="Processing tiles")):
                 if tile_mask is not None and not tile_mask[idx]:
                     tiles_preds_for_viz.append(None)
@@ -332,32 +446,18 @@ class WSIPredictor:
                 tile = tiles[idx]
                 position = positions[idx]
                 
-                # 🔥 DEBUG: Save ORIGINAL input patches
-                debug_dir = Path(output_dir) / 'debug_patches'
-                debug_dir.mkdir(exist_ok=True, parents=True)
-                y1, x1, y2, x2 = position
-                
-                # Save ORIGINAL tile (before any preprocessing)
-                tile_to_save = tile.copy()
-                if tile_to_save.max() <= 1.0:
-                    tile_to_save = (tile_to_save * 255).astype(np.uint8)
-                cv2.imwrite(
-                    str(debug_dir / f'input_{idx:04d}_x{x1}_y{y1}.png'),
-                    cv2.cvtColor(tile_to_save, cv2.COLOR_RGB2BGR)
+                # Run inference (single input)
+                pred = self._predict_tile(
+                    tile_he=tile, 
+                    tile_mif=None,
+                    branch=branch, 
+                    is_mif=is_mif_branch
                 )
                 
-                # Run inference
-                pred = self._predict_tile(tile, branch, is_mif=is_mif)
+                if save_masks or save_visualization:
+                    tiles_preds_for_viz.append(None)
                 
-                # Save prediction
-                cv2.imwrite(
-                    str(debug_dir / f'pred_{idx:04d}_x{x1}_y{y1}.png'),
-                    (pred['seg'] * 255).astype(np.uint8)
-                )
-                
-                tiles_preds_for_viz.append(pred)
-                
-                # IMMEDIATELY extract instances from this tile
+                # Extract instances
                 cells_in_tile = self.tile_processor.process_tile_instances(
                     tile_pred=pred,
                     position=position,
@@ -365,45 +465,58 @@ class WSIPredictor:
                     mpp=mpp,
                     detection_threshold=detection_threshold,
                     min_area_um=min_area_um,
-                    use_gpu=True
+                    use_gpu=True,
+                    scale_factor=scale_factor
                 )
                 all_cells.extend(cells_in_tile)
+                
         else:
-            # H&E streaming path - load tiles on-demand
-            debug_dir = Path(output_dir) / 'debug_patches'
-            debug_dir.mkdir(exist_ok=True, parents=True)
-            
+            # Streaming path - load tiles on-demand
             for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
                 if tile_mask is not None and not tile_mask[idx]:
                     tiles_preds_for_viz.append(None)
                     continue
                 
-                # Read tile on-demand from WSI
-                tile = self.tile_processor.read_tile(position)
-                
-                # 🔥 DEBUG: Save ORIGINAL input tile
-                y1, x1, y2, x2 = position
-                tile_to_save = tile.copy()
-                if tile_to_save.max() <= 1.0:
-                    tile_to_save = (tile_to_save * 255).astype(np.uint8)
-                cv2.imwrite(
-                    str(debug_dir / f'input_{idx:04d}_x{x1}_y{y1}.png'),
-                    cv2.cvtColor(tile_to_save, cv2.COLOR_RGB2BGR)
-                )
-                
-                # Run inference
-                pred = self._predict_tile(tile, branch, is_mif=is_mif)
-                
-                # Save prediction
-                cv2.imwrite(
-                    str(debug_dir / f'pred_{idx:04d}_x{x1}_y{y1}.png'),
-                    (pred['seg'] * 255).astype(np.uint8)
-                )
+                # 🔥 NEW: For dual models, read BOTH H&E and MIF tiles
+                if self.is_dual_model:
+                    # Read H&E tile from streaming reader
+                    tile_he = self.tile_processor.read_tile(position)
+                    
+                    # Read corresponding MIF tile at same position
+                    tile_mif = self.tile_processor.read_tile_mif(position)
+                    
+                    # Resize both tiles if needed
+                    if scale_factor != 1.0:
+                        new_size = int(self.patch_size * scale_factor)
+                        tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                        tile_mif = cv2.resize(tile_mif, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                    
+                    # Run dual inference
+                    pred = self._predict_tile(
+                        tile_he=tile_he,
+                        tile_mif=tile_mif,
+                        branch=branch,
+                        is_mif=is_mif_branch
+                    )
+                else:
+                    # Single-modality H&E streaming
+                    tile_he = self.tile_processor.read_tile(position)
+                    
+                    if scale_factor != 1.0:
+                        new_size = int(self.patch_size * scale_factor)
+                        tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                    
+                    pred = self._predict_tile(
+                        tile_he=tile_he,
+                        tile_mif=None,
+                        branch=branch,
+                        is_mif=is_mif_branch
+                    )
                 
                 if save_masks or save_visualization:
-                    tiles_preds_for_viz.append(pred)
+                    tiles_preds_for_viz.append(None)
                 
-                # IMMEDIATELY extract instances from this tile
+                # Extract instances
                 cells_in_tile = self.tile_processor.process_tile_instances(
                     tile_pred=pred,
                     position=position,
@@ -411,7 +524,8 @@ class WSIPredictor:
                     mpp=mpp,
                     detection_threshold=detection_threshold,
                     min_area_um=min_area_um,
-                    use_gpu=True
+                    use_gpu=True,
+                    scale_factor=scale_factor
                 )
                 all_cells.extend(cells_in_tile)
 
@@ -430,10 +544,9 @@ class WSIPredictor:
         
         num_instances = len(inst_info)
         
-        # 6. Clean overlaps (only cells at tile boundaries)
+        # Clean overlaps
         if clean_overlaps and len(inst_info) > 0:
             self.logger.info(f"🧹 Cleaning overlapping instances at tile boundaries...")
-            # Filter to only clean edge cells (more efficient)
             edge_cells = [cell for cell in all_cells if cell.get('edge_position', False)]
             self.logger.info(f"   Found {len(edge_cells)} edge cells to check for overlaps")
             
@@ -441,13 +554,12 @@ class WSIPredictor:
             num_instances = len(inst_info)
             self.logger.info(f"   ✓ After cleaning: {num_instances} instances")
         
-        # 7. Save results
+        # Save results
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
         
         self.logger.info(f"💾 Saving results to {output_dir}...")
         
-        # Determine object type from branch
         object_type = 'nuclei' if 'nuclei' in branch else 'cell'
         
         if save_json or save_geojson:
@@ -458,28 +570,30 @@ class WSIPredictor:
                 object_type=object_type
             )
         
-        if save_masks or save_visualization:
-            # Create stitched predictions for visualization only
-            self.logger.info(f"   Creating visualization masks...")
-            stitched = self.tile_processor.stitch_predictions(
-                tiles_preds=tiles_preds_for_viz,
-                positions=positions,
-                image_shape=image_shape,
-                branch_outputs=None,
-                tile_mask=tile_mask
-            )
-            
-            if save_masks:
-                self._save_masks(stitched, output_dir, object_type)
-        
         if save_visualization:
-            # For visualization, need to load image if not already loaded
+            # Load appropriate image for visualization
             if image is None:
-                # Re-open for visualization only
                 self.logger.info(f"   Loading full image for visualization...")
-                wsi_reader_viz = self.wsi_handler.get_wsi_reader(wsi_path)
-                image = wsi_reader_viz.read_region((0, 0), (wsi_reader_viz.width, wsi_reader_viz.height))
-                wsi_reader_viz.close()
+                
+                # 🔥 NEW: Load MIF image for MIF branches, H&E for H&E branches
+                if is_mif_branch:
+                    # Load MIF image
+                    if self.is_dual_model and wsi_path_mif is not None:
+                        # For dual models, load from MIF path
+                        image_mif_viz = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
+                        image = np.transpose(image_mif_viz, (1, 2, 0))  # (2, H, W) -> (H, W, 2)
+                    else:
+                        # For single-modality MIF, it's already loaded or use wsi_path
+                        if wsi_path_mif:
+                            image_mif_viz = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
+                        else:
+                            image_mif_viz = self.wsi_handler.load_mif_image(wsi_path, self.mif_channel_config)
+                        image = np.transpose(image_mif_viz, (1, 2, 0))  # (2, H, W) -> (H, W, 2)
+                else:
+                    # Load H&E image
+                    wsi_reader_viz = self.wsi_handler.get_wsi_reader(wsi_path)
+                    image = wsi_reader_viz.read_region((0, 0), (wsi_reader_viz.width, wsi_reader_viz.height))
+                    wsi_reader_viz.close()
             
             self._save_visualization(image, inst_info, output_dir, object_type)
         
@@ -497,47 +611,104 @@ class WSIPredictor:
         
         return results
 
-
-    def _predict_tile(self, tile, branch, is_mif=False):
-        """Run inference on a single tile
+    def _predict_tile(self, tile_he, tile_mif=None, branch='he_nuclei', is_mif=False):
+        """Run inference on a single tile (supports both single and dual models)
         
         Args:
-            tile: Tile image (H, W, C)
+            tile_he: H&E tile image (H, W, 3) - RGB
+            tile_mif: MIF tile image (H, W, 2) - 2-channel (nuclear, membrane)
             branch: Branch name
-            is_mif: Whether this is MIF data (affects preprocessing)
+            is_mif: Whether this is MIF data (affects preprocessing for single-modality)
+        
+        Returns:
+            dict: Predictions with 'seg' and 'hv' keys
         """
-        # Prepare tile
-        if tile.max() > 1.0:
-            tile = tile.astype(np.float32) / 255.0
-        
-        # Convert to tensor: (H, W, C) -> (1, C, H, W)
-        tile_tensor = torch.from_numpy(tile).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        
-        # Apply appropriate preprocessing based on image type
-        if is_mif:
-            from vitaminp import prepare_mif_input
-            tile_tensor = prepare_mif_input(tile_tensor)
-        else:
+        # ========================================================================
+        # 🔥 DUAL MODEL PATH
+        # ========================================================================
+        if self.is_dual_model:
+            if tile_mif is None:
+                raise ValueError("Dual model requires both tile_he and tile_mif inputs")
+            
+            # Prepare H&E tile (3 channels - RGB)
+            if tile_he.max() > 1.0:
+                tile_he = tile_he.astype(np.float32) / 255.0
+            tile_he_tensor = torch.from_numpy(tile_he).permute(2, 0, 1).unsqueeze(0).to(self.device)
+            
+            # Prepare MIF tile (2 channels - already processed by load_mif_image)
+            # tile_mif is already float32 in [0, 1] range and shape (H, W, 2)
+            if tile_mif.max() > 1.0:
+                tile_mif = tile_mif.astype(np.float32) / 255.0
+            
+            # Convert (H, W, 2) -> (1, 2, H, W)
+            tile_mif_tensor = torch.from_numpy(tile_mif).permute(2, 0, 1).unsqueeze(0).to(self.device)
+            
+            # Apply preprocessing
             from vitaminp import prepare_he_input
-            tile_tensor = prepare_he_input(tile_tensor)
+            tile_he_tensor = prepare_he_input(tile_he_tensor)
+            
+            # 🔥 DO NOT use prepare_mif_input for dual models - it adds a 3rd channel
+            # MIF backbone expects 2 channels, not 3
+            # tile_mif_tensor stays as (1, 2, H, W)
+            
+            # Apply normalization
+            tile_he_tensor = self.preprocessor.percentile_normalize(tile_he_tensor)
+            tile_mif_tensor = self.preprocessor.percentile_normalize(tile_mif_tensor)
+            
+            # Predict with BOTH inputs
+            with torch.no_grad():
+                if self.mixed_precision:
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model(tile_he_tensor, tile_mif_tensor)  # 🔥 TWO INPUTS
+                else:
+                    outputs = self.model(tile_he_tensor, tile_mif_tensor)  # 🔥 TWO INPUTS
+            
+            # Extract branch outputs
+            branch_config = self.SUPPORTED_BRANCHES[branch]
+            seg = outputs[branch_config['seg_key']][0, 0].cpu().numpy()
+            hv = outputs[branch_config['hv_key']][0].cpu().numpy()
+            
+            return {'seg': seg, 'hv': hv}
         
-        # Apply normalization
-        tile_tensor = self.preprocessor.percentile_normalize(tile_tensor)
-        
-        # Predict
-        with torch.no_grad():
-            if self.mixed_precision:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(tile_tensor)
+        # ========================================================================
+        # SINGLE-MODALITY MODEL PATH (existing logic)
+        # ========================================================================
+        else:
+            # For single-modality, tile_he contains either H&E or MIF data
+            tile = tile_he
+            
+            # Prepare tile
+            if tile.max() > 1.0:
+                tile = tile.astype(np.float32) / 255.0
+            
+            # Convert to tensor: (H, W, C) -> (1, C, H, W)
+            tile_tensor = torch.from_numpy(tile).permute(2, 0, 1).unsqueeze(0).to(self.device)
+            
+            # Apply appropriate preprocessing based on image type
+            if is_mif:
+                from vitaminp import prepare_mif_input
+                tile_tensor = prepare_mif_input(tile_tensor)  # Adds 3rd channel for single-modality
             else:
-                outputs = self.model(tile_tensor)
-        
-        # Extract branch outputs
-        branch_config = self.SUPPORTED_BRANCHES[branch]
-        seg = outputs[branch_config['seg_key']][0, 0].cpu().numpy()
-        hv = outputs[branch_config['hv_key']][0].cpu().numpy()
-        
-        return {'seg': seg, 'hv': hv}
+                from vitaminp import prepare_he_input
+                tile_tensor = prepare_he_input(tile_tensor)
+            
+            # Apply normalization
+            tile_tensor = self.preprocessor.percentile_normalize(tile_tensor)
+            
+            # Predict with single input
+            with torch.no_grad():
+                if self.mixed_precision:
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model(tile_tensor)
+                else:
+                    outputs = self.model(tile_tensor)
+            
+            # Extract branch outputs
+            branch_config = self.SUPPORTED_BRANCHES[branch]
+            seg = outputs[branch_config['seg_key']][0, 0].cpu().numpy()
+            hv = outputs[branch_config['hv_key']][0].cpu().numpy()
+            
+            return {'seg': seg, 'hv': hv}
 
     def _clean_overlaps(self, inst_info, iou_threshold):
         """Clean overlapping instances"""

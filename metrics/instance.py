@@ -8,9 +8,37 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 
+def remap_label(instance_map):
+    """
+    Remap instance IDs to be contiguous [0, 1, 2, 3, ...]
+    This is critical for performance with non-contiguous IDs
+    
+    Args:
+        instance_map: Instance map with potentially non-contiguous IDs
+    
+    Returns:
+        Remapped instance map with contiguous IDs
+    """
+    if isinstance(instance_map, torch.Tensor):
+        instance_map = instance_map.cpu().numpy()
+    
+    instance_map = instance_map.copy()
+    unique_ids = np.unique(instance_map)
+    unique_ids = unique_ids[unique_ids != 0]  # Remove background
+    
+    if len(unique_ids) == 0:
+        return instance_map
+    
+    new_map = np.zeros_like(instance_map, dtype=np.int32)
+    for new_id, old_id in enumerate(unique_ids, start=1):
+        new_map[instance_map == old_id] = new_id
+    
+    return new_map
+
+
 def get_fast_pq(true, pred, match_iou=0.5):
     """
-    Fast Panoptic Quality (PQ) computation
+    Fast Panoptic Quality (PQ) computation with optimized sparse IoU matrix
     PQ = (TP * SQ) / (TP + 0.5*FP + 0.5*FN)
     
     Args:
@@ -32,12 +60,18 @@ def get_fast_pq(true, pred, match_iou=0.5):
     true = true.astype(np.int32)
     pred = pred.astype(np.int32)
     
-    # Get unique instance IDs (excluding background 0)
-    true_id_list = np.unique(true)
-    pred_id_list = np.unique(pred)
+    # Remap to contiguous IDs for performance
+    true = remap_label(true)
+    pred = remap_label(pred)
     
-    true_id_list = true_id_list[true_id_list != 0]
-    pred_id_list = pred_id_list[pred_id_list != 0]
+    # Get unique instance IDs (excluding background 0)
+    true_id_list = list(np.unique(true))
+    pred_id_list = list(np.unique(pred))
+    
+    if 0 in true_id_list:
+        true_id_list.remove(0)
+    if 0 in pred_id_list:
+        pred_id_list.remove(0)
     
     # Quick return for empty cases
     if len(true_id_list) == 0 and len(pred_id_list) == 0:
@@ -47,35 +81,46 @@ def get_fast_pq(true, pred, match_iou=0.5):
     if len(pred_id_list) == 0:
         return 0.0, 0.0, 0.0
     
-    # Compute IoU for all pairs
-    true_masks = [(true == i) for i in true_id_list]
-    pred_masks = [(pred == i) for i in pred_id_list]
+    # Precompute masks
+    true_masks = {}
+    for t in true_id_list:
+        true_masks[t] = np.array(true == t, np.uint8)
     
-    # Pairwise IoU matrix
-    pairwise_iou = np.zeros((len(true_id_list), len(pred_id_list)))
+    pred_masks = {}
+    for p in pred_id_list:
+        pred_masks[p] = np.array(pred == p, np.uint8)
     
-    for i, true_mask in enumerate(true_masks):
-        for j, pred_mask in enumerate(pred_masks):
-            intersection = np.logical_and(true_mask, pred_mask).sum()
-            union = np.logical_or(true_mask, pred_mask).sum()
-            if union > 0:
-                pairwise_iou[i, j] = intersection / union
+    # Build sparse IoU matrix - only compute for overlapping pairs
+    pairwise_iou = np.zeros((len(true_id_list), len(pred_id_list)), dtype=np.float64)
+    
+    for i, true_id in enumerate(true_id_list):
+        t_mask = true_masks[true_id]
+        
+        # Only check predictions that overlap with this ground truth
+        pred_true_overlap = pred[t_mask > 0]
+        pred_true_overlap_id = np.unique(pred_true_overlap)
+        pred_true_overlap_id = pred_true_overlap_id[pred_true_overlap_id != 0]
+        
+        for pred_id in pred_true_overlap_id:
+            if pred_id not in pred_id_list:
+                continue
+            
+            j = pred_id_list.index(pred_id)
+            p_mask = pred_masks[pred_id]
+            
+            total = (t_mask + p_mask).sum()
+            inter = (t_mask * p_mask).sum()
+            iou = inter / (total - inter)
+            pairwise_iou[i, j] = iou
     
     # Match instances using Hungarian algorithm
-    paired_true = []
-    paired_pred = []
-    paired_iou = []
+    true_indices, pred_indices = linear_sum_assignment(-pairwise_iou)
     
-    if pairwise_iou.shape[0] > 0 and pairwise_iou.shape[1] > 0:
-        # Find best matches
-        true_indices, pred_indices = linear_sum_assignment(-pairwise_iou)
-        
-        for t_idx, p_idx in zip(true_indices, pred_indices):
-            iou_val = pairwise_iou[t_idx, p_idx]
-            if iou_val > match_iou:
-                paired_true.append(t_idx)
-                paired_pred.append(p_idx)
-                paired_iou.append(iou_val)
+    paired_iou = []
+    for t_idx, p_idx in zip(true_indices, pred_indices):
+        iou_val = pairwise_iou[t_idx, p_idx]
+        if iou_val > match_iou:
+            paired_iou.append(iou_val)
     
     # Calculate metrics
     tp = len(paired_iou)
@@ -144,7 +189,8 @@ def segmentation_quality(true, pred, match_iou=0.5):
 
 def get_fast_aji(true, pred):
     """
-    Aggregated Jaccard Index (AJI)
+    Aggregated Jaccard Index (AJI) with optimized computation
+    Only checks overlapping instance pairs instead of all combinations
     
     AJI = sum(intersections) / sum(unions + unmatched_pred_areas)
     
@@ -164,12 +210,18 @@ def get_fast_aji(true, pred):
     true = true.astype(np.int32)
     pred = pred.astype(np.int32)
     
-    # Get unique IDs
-    true_id_list = np.unique(true)
-    pred_id_list = np.unique(pred)
+    # Remap to contiguous IDs for performance
+    true = remap_label(true)
+    pred = remap_label(pred)
     
-    true_id_list = true_id_list[true_id_list != 0]
-    pred_id_list = pred_id_list[pred_id_list != 0]
+    # Get unique IDs
+    true_id_list = list(np.unique(true))
+    pred_id_list = list(np.unique(pred))
+    
+    if 0 in true_id_list:
+        true_id_list.remove(0)
+    if 0 in pred_id_list:
+        pred_id_list.remove(0)
     
     # Quick return for empty cases
     if len(true_id_list) == 0 and len(pred_id_list) == 0:
@@ -177,9 +229,14 @@ def get_fast_aji(true, pred):
     if len(true_id_list) == 0:
         return 0.0
     
-    # Compute pairwise IoU
-    true_masks = {i: (true == i) for i in true_id_list}
-    pred_masks = {i: (pred == i) for i in pred_id_list}
+    # Precompute masks
+    true_masks = {}
+    for t in true_id_list:
+        true_masks[t] = np.array(true == t, np.uint8)
+    
+    pred_masks = {}
+    for p in pred_id_list:
+        pred_masks[p] = np.array(pred == p, np.uint8)
     
     # For each true instance, find best matching pred instance
     total_intersection = 0
@@ -187,36 +244,48 @@ def get_fast_aji(true, pred):
     matched_pred = set()
     
     for true_id in true_id_list:
-        true_mask = true_masks[true_id]
+        t_mask = true_masks[true_id]
+        
+        # Only get predictions that overlap with this ground truth
+        pred_true_overlap = pred[t_mask > 0]
+        pred_true_overlap_id = np.unique(pred_true_overlap)
+        pred_true_overlap_id = pred_true_overlap_id[pred_true_overlap_id != 0]
+        
+        if len(pred_true_overlap_id) == 0:
+            # No overlap with any prediction
+            total_union += t_mask.sum()
+            continue
+        
+        # Find best matching prediction among overlapping ones
         max_iou = 0
         max_pred_id = None
         
-        for pred_id in pred_id_list:
+        for pred_id in pred_true_overlap_id:
             if pred_id in matched_pred:
                 continue
-            pred_mask = pred_masks[pred_id]
             
-            intersection = np.logical_and(true_mask, pred_mask).sum()
-            union = np.logical_or(true_mask, pred_mask).sum()
+            p_mask = pred_masks[pred_id]
+            total = (t_mask + p_mask).sum()
+            inter = (t_mask * p_mask).sum()
+            union = total - inter
             
             if union > 0:
-                iou = intersection / union
+                iou = inter / union
                 if iou > max_iou:
                     max_iou = iou
                     max_pred_id = pred_id
         
         # Add to totals
         if max_pred_id is not None:
-            pred_mask = pred_masks[max_pred_id]
-            intersection = np.logical_and(true_mask, pred_mask).sum()
-            union = np.logical_or(true_mask, pred_mask).sum()
+            p_mask = pred_masks[max_pred_id]
+            total = (t_mask + p_mask).sum()
+            inter = (t_mask * p_mask).sum()
             
-            total_intersection += intersection
-            total_union += union
+            total_intersection += inter
+            total_union += total - inter
             matched_pred.add(max_pred_id)
         else:
-            # No match found, add true mask area to union
-            total_union += true_mask.sum()
+            total_union += t_mask.sum()
     
     # Add unmatched predicted instances to union
     for pred_id in pred_id_list:
@@ -249,12 +318,18 @@ def get_fast_aji_plus(true, pred):
     true = true.astype(np.int32)
     pred = pred.astype(np.int32)
     
-    # Get unique IDs
-    true_id_list = np.unique(true)
-    pred_id_list = np.unique(pred)
+    # Remap to contiguous IDs for performance
+    true = remap_label(true)
+    pred = remap_label(pred)
     
-    true_id_list = true_id_list[true_id_list != 0]
-    pred_id_list = pred_id_list[pred_id_list != 0]
+    # Get unique IDs
+    true_id_list = list(np.unique(true))
+    pred_id_list = list(np.unique(pred))
+    
+    if 0 in true_id_list:
+        true_id_list.remove(0)
+    if 0 in pred_id_list:
+        pred_id_list.remove(0)
     
     # Quick return for empty cases
     if len(true_id_list) == 0 and len(pred_id_list) == 0:
@@ -262,48 +337,43 @@ def get_fast_aji_plus(true, pred):
     if len(true_id_list) == 0:
         return 0.0
     
-    # Compute intersection matrix
-    true_masks = {i: (true == i) for i in true_id_list}
-    pred_masks = {i: (pred == i) for i in pred_id_list}
+    # Precompute masks
+    true_masks = {}
+    for t in true_id_list:
+        true_masks[t] = np.array(true == t, np.uint8)
     
-    # Build intersection matrix
-    intersection_matrix = np.zeros((len(true_id_list), len(pred_id_list)))
-    
-    for i, true_id in enumerate(true_id_list):
-        true_mask = true_masks[true_id]
-        for j, pred_id in enumerate(pred_id_list):
-            pred_mask = pred_masks[pred_id]
-            intersection_matrix[i, j] = np.logical_and(true_mask, pred_mask).sum()
+    pred_masks = {}
+    for p in pred_id_list:
+        pred_masks[p] = np.array(pred == p, np.uint8)
     
     # For each true, find all overlapping predictions
     total_intersection = 0
     total_union = 0
     used_pred = set()
     
-    for i, true_id in enumerate(true_id_list):
-        true_mask = true_masks[true_id]
+    for true_id in true_id_list:
+        t_mask = true_masks[true_id]
         
-        # Find all predictions that overlap with this true instance
-        overlapping_preds = []
-        for j, pred_id in enumerate(pred_id_list):
-            if intersection_matrix[i, j] > 0:
-                overlapping_preds.append(pred_id)
-                used_pred.add(pred_id)
+        # Only get predictions that overlap with this ground truth
+        pred_true_overlap = pred[t_mask > 0]
+        pred_true_overlap_id = np.unique(pred_true_overlap)
+        pred_true_overlap_id = pred_true_overlap_id[pred_true_overlap_id != 0]
         
-        if len(overlapping_preds) > 0:
+        if len(pred_true_overlap_id) > 0:
             # Union of all overlapping predictions
-            combined_pred = np.zeros_like(true_mask, dtype=bool)
-            for pred_id in overlapping_preds:
+            combined_pred = np.zeros_like(t_mask, dtype=bool)
+            for pred_id in pred_true_overlap_id:
                 combined_pred = np.logical_or(combined_pred, pred_masks[pred_id])
+                used_pred.add(pred_id)
             
-            intersection = np.logical_and(true_mask, combined_pred).sum()
-            union = np.logical_or(true_mask, combined_pred).sum()
+            intersection = np.logical_and(t_mask, combined_pred).sum()
+            union = np.logical_or(t_mask, combined_pred).sum()
             
             total_intersection += intersection
             total_union += union
         else:
             # No overlapping predictions
-            total_union += true_mask.sum()
+            total_union += t_mask.sum()
     
     # Add unmatched predictions
     for pred_id in pred_id_list:

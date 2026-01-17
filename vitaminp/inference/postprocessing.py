@@ -24,8 +24,9 @@ from skimage.morphology import remove_small_objects
 
 
 def process_model_outputs(seg_pred, h_map, v_map, magnification=40, 
-                          min_area=10, max_area=None, detection_threshold=0.5,
+                          min_area=80, max_area=None, detection_threshold=0.6,
                           use_gpu=True):
+    print(f"🔍 DEBUG: min_area={min_area}, detection_threshold={detection_threshold}")  # ← ADD THIS
     """Extract instance maps from model predictions using GPU-accelerated HoVer-Net method
     
     Args:
@@ -152,7 +153,7 @@ def _process_with_cpu(seg_pred, h_map, v_map, magnification, min_area):
     return inst_map
 
 
-def _extract_instance_info_optimized(inst_map, min_area=10, max_area=None, use_gpu=True):
+def _extract_instance_info_optimized(inst_map, min_area=80, max_area=None, use_gpu=True):
     """GPU-ACCELERATED: Extract instance information with contours in batch
     
     Key optimizations:

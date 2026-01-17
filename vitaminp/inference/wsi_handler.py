@@ -46,7 +46,6 @@ class MultiFormatImageLoader:
             try:
                 return OpenSlideReader(image_path)
             except:
-                print(f"⚠️  OpenSlide failed, trying TiffReader")
                 return TiffReader(image_path)
         
         # OME-TIFF
@@ -108,7 +107,6 @@ class MultiFormatImageLoader:
             slide.close()
             return image
         except Exception as e:
-            print(f"⚠️  OpenSlide failed, trying tifffile: {e}")
             return MultiFormatImageLoader._load_tifffile(path)
     
     @staticmethod
@@ -201,17 +199,14 @@ class MultiFormatImageLoader:
         import tifffile
         mif_array = tifffile.imread(str(image_path))
         
-        print(f"Loaded MIF: shape={mif_array.shape}, dtype={mif_array.dtype}")
         
         # Apply channel configuration
         if channel_config is not None:
-            print(f"Applying channel config: {channel_config.get_description()}")
             mif_2ch = channel_config.select_channels(mif_array)
         else:
             # Default: use first 2 channels
             if mif_array.ndim == 3 and mif_array.shape[0] >= 2:
                 mif_2ch = mif_array[:2, :, :]
-                print(f"Using default: first 2 channels")
             else:
                 raise ValueError(
                     f"Cannot auto-select channels from shape {mif_array.shape}. "
@@ -241,30 +236,41 @@ class OpenSlideReader:
         self.dimensions = self.slide.level_dimensions[0]
         self.width, self.height = self.dimensions
         
-    def read_region(self, location, size):
-        """Read a region from the slide
+        # MPP detection (already added)
+        self.mpp = None
+        self.magnification = None
         
-        Args:
-            location: (x, y) top-left corner
-            size: (width, height) of region
+        try:
+            if openslide.PROPERTY_NAME_MPP_X in self.slide.properties:
+                self.mpp = float(self.slide.properties[openslide.PROPERTY_NAME_MPP_X])
+            elif 'aperio.MPP' in self.slide.properties:
+                self.mpp = float(self.slide.properties['aperio.MPP'])
             
-        Returns:
-            numpy array (H, W, 3), uint8, RGB
-        """
+            if 'aperio.AppMag' in self.slide.properties:
+                self.magnification = int(self.slide.properties['aperio.AppMag'])
+            elif openslide.PROPERTY_NAME_OBJECTIVE_POWER in self.slide.properties:
+                self.magnification = int(self.slide.properties[openslide.PROPERTY_NAME_OBJECTIVE_POWER])
+        except:
+            pass
+    
+    def read_region(self, location, size):
+        """Read a region from the slide"""
         x, y = location
         w, h = size
         region = self.slide.read_region((x, y), 0, (w, h))
         return np.array(region.convert('RGB'))
     
+    # ← ADD THESE METHODS
     def close(self):
-        self.slide.close()
+        """Close the slide"""
+        if hasattr(self, 'slide') and self.slide is not None:
+            self.slide.close()
     
     def __enter__(self):
         return self
     
     def __exit__(self, *args):
         self.close()
-
 
 class TiffReader:
     """Stream tiles from TIFF/OME-TIFF files"""
@@ -279,6 +285,43 @@ class TiffReader:
             self.page = self.tif.pages[0]
             self.height, self.width = self.page.shape[:2]
         
+        # ← ADD MPP DETECTION FOR OME-TIFF
+        self.mpp = None
+        self.magnification = None
+        
+        try:
+            # Method 1: OME-XML metadata
+            if hasattr(self.tif, 'ome_metadata') and self.tif.ome_metadata:
+                # Parse OME-XML for PhysicalSizeX
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(self.tif.ome_metadata)
+                ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+                pixels = root.find('.//ome:Pixels', ns)
+                if pixels is not None:
+                    # PhysicalSizeX/Y are in micrometers
+                    physical_size_x = pixels.get('PhysicalSizeX')
+                    if physical_size_x:
+                        self.mpp = float(physical_size_x)
+            
+            # Method 2: TIFF resolution tags (fallback)
+            if self.mpp is None and hasattr(self.page, 'tags'):
+                if 'XResolution' in self.page.tags and 'ResolutionUnit' in self.page.tags:
+                    x_res = self.page.tags['XResolution'].value
+                    unit = self.page.tags['ResolutionUnit'].value
+                    
+                    # Convert to microns per pixel
+                    if unit == 3:  # Centimeter
+                        # x_res is pixels per cm, convert to μm/px
+                        if isinstance(x_res, tuple):
+                            x_res = x_res[0] / x_res[1]
+                        self.mpp = 10000.0 / x_res  # cm to μm
+                    elif unit == 2:  # Inch
+                        if isinstance(x_res, tuple):
+                            x_res = x_res[0] / x_res[1]
+                        self.mpp = 25400.0 / x_res  # inch to μm
+        except Exception as e:
+            pass  # If metadata reading fails, mpp stays None
+    
     def read_region(self, location, size):
         """Read a region from the TIFF
         

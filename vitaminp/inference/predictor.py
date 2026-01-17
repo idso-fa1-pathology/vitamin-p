@@ -133,27 +133,17 @@ class WSIPredictor:
         save_heatmap=False,
         save_visualization=True,
         detection_threshold=0.5,
+        min_area_um=3.0,        # ← ADD THIS
+        mpp_override=None,      # ← ADD THIS (for expert users)
     ):
         """Run inference on WSI
         
         Args:
-            wsi_path: Path to WSI file
-            output_dir: Output directory
-            branch: Single branch to process ('he_nuclei', 'he_cell', etc.)
-            branches: List of branches (overrides single branch)
-            wsi_properties: Dict with slide_mpp, magnification
-            filter_tissue: Apply tissue filtering
-            tissue_threshold: Tissue threshold
-            clean_overlaps: Clean overlapping detections
-            iou_threshold: IoU threshold for overlap cleaning
-            save_masks: Save binary masks
-            save_json: Save JSON results
-            save_geojson: Save GeoJSON results
-            save_csv: Save CSV results
-            save_heatmap: Save heatmap
-            save_visualization: Save visualizations
-            detection_threshold: Binary threshold for instance extraction
-            
+            # ... existing args ...
+            detection_threshold: Binary threshold for instance extraction (0.5-0.8)
+            min_area_um: Minimum cell area in μm² (default 3.0 for nuclei, None to disable)
+            mpp_override: Override auto-detected MPP (for files with bad/missing metadata)
+        
         Returns:
             dict: Results with predictions, instances, timing
         """
@@ -186,6 +176,8 @@ class WSIPredictor:
                 filter_tissue=filter_tissue,
                 tissue_threshold=tissue_threshold,
                 detection_threshold=detection_threshold,
+                min_area_um=min_area_um,      # ← ADD THIS
+                mpp_override=mpp_override,    # ← ADD THIS
             )
         else:
             # Multiple branches
@@ -210,6 +202,8 @@ class WSIPredictor:
                     filter_tissue=filter_tissue,
                     tissue_threshold=tissue_threshold,
                     detection_threshold=detection_threshold,
+                    min_area_um=min_area_um,      # ← ADD THIS
+                    mpp_override=mpp_override,    # ← ADD THIS
                 )
                 all_results[b] = results
             
@@ -230,13 +224,51 @@ class WSIPredictor:
         filter_tissue=False,
         tissue_threshold=0.1,
         detection_threshold=0.5,
+        min_area_um=3.0,        # ← ADD THIS
+        mpp_override=None,      # ← ADD THIS
     ):
         """Process a single branch with per-tile instance extraction (NEW ARCHITECTURE)"""
         start_time = time.time()
         
         # Detect if this is a MIF branch
         is_mif = 'mif' in branch.lower()
+        # Auto-detect MPP from WSI metadata
+        mpp = mpp_override if mpp_override is not None else self.target_mpp  # Start with override or default
+        detected_mag = None
         
+        if not is_mif and mpp_override is None:
+            try:
+                # Try to detect from file metadata
+                temp_reader = self.wsi_handler.get_wsi_reader(wsi_path)
+                if hasattr(temp_reader, 'mpp') and temp_reader.mpp is not None:
+                    mpp = temp_reader.mpp
+                    self.logger.info(f"   ✓ Auto-detected MPP: {mpp:.4f} μm/px from file metadata")
+                else:
+                    self.logger.info(f"   ⚠ No MPP in metadata, using default: {mpp:.4f} μm/px")
+                
+                if hasattr(temp_reader, 'magnification') and temp_reader.magnification is not None:
+                    detected_mag = temp_reader.magnification
+                    self.logger.info(f"   ✓ Auto-detected magnification: {detected_mag}x from file metadata")
+                
+                temp_reader.close()
+            except Exception as e:
+                self.logger.info(f"   ⚠ Could not read metadata, using defaults (MPP={mpp:.4f})")
+        else:
+            if mpp_override is not None:
+                self.logger.info(f"   Manual MPP override: {mpp:.4f} μm/px")
+            else:
+                self.logger.info(f"   Using default MPP: {mpp:.4f} μm/px (MIF mode)")
+        
+        # Log filtering settings
+        if min_area_um is not None:
+            min_area_pixels = min_area_um / (mpp ** 2)
+            self.logger.info(f"   Min area filter: {min_area_um:.1f} μm² = {min_area_pixels:.0f} pixels²")
+        else:
+            self.logger.info(f"   No area filtering")
+        
+        # Use detected magnification if available
+        magnification_to_use = detected_mag if detected_mag is not None else self.magnification
+
         # 1. Open WSI reader (streaming - no full loading!)
         self.logger.info(f"📁 Opening WSI: {wsi_path}")
         
@@ -300,21 +332,47 @@ class WSIPredictor:
                 tile = tiles[idx]
                 position = positions[idx]
                 
+                # 🔥 DEBUG: Save ORIGINAL input patches
+                debug_dir = Path(output_dir) / 'debug_patches'
+                debug_dir.mkdir(exist_ok=True, parents=True)
+                y1, x1, y2, x2 = position
+                
+                # Save ORIGINAL tile (before any preprocessing)
+                tile_to_save = tile.copy()
+                if tile_to_save.max() <= 1.0:
+                    tile_to_save = (tile_to_save * 255).astype(np.uint8)
+                cv2.imwrite(
+                    str(debug_dir / f'input_{idx:04d}_x{x1}_y{y1}.png'),
+                    cv2.cvtColor(tile_to_save, cv2.COLOR_RGB2BGR)
+                )
+                
                 # Run inference
                 pred = self._predict_tile(tile, branch, is_mif=is_mif)
+                
+                # Save prediction
+                cv2.imwrite(
+                    str(debug_dir / f'pred_{idx:04d}_x{x1}_y{y1}.png'),
+                    (pred['seg'] * 255).astype(np.uint8)
+                )
+                
                 tiles_preds_for_viz.append(pred)
                 
                 # IMMEDIATELY extract instances from this tile
                 cells_in_tile = self.tile_processor.process_tile_instances(
                     tile_pred=pred,
                     position=position,
-                    magnification=self.magnification,
+                    magnification=magnification_to_use,
+                    mpp=mpp,
                     detection_threshold=detection_threshold,
-                    use_gpu=True  # Now safe to use GPU on small tiles!
+                    min_area_um=min_area_um,
+                    use_gpu=True
                 )
                 all_cells.extend(cells_in_tile)
         else:
             # H&E streaming path - load tiles on-demand
+            debug_dir = Path(output_dir) / 'debug_patches'
+            debug_dir.mkdir(exist_ok=True, parents=True)
+            
             for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
                 if tile_mask is not None and not tile_mask[idx]:
                     tiles_preds_for_viz.append(None)
@@ -323,26 +381,40 @@ class WSIPredictor:
                 # Read tile on-demand from WSI
                 tile = self.tile_processor.read_tile(position)
                 
+                # 🔥 DEBUG: Save ORIGINAL input tile
+                y1, x1, y2, x2 = position
+                tile_to_save = tile.copy()
+                if tile_to_save.max() <= 1.0:
+                    tile_to_save = (tile_to_save * 255).astype(np.uint8)
+                cv2.imwrite(
+                    str(debug_dir / f'input_{idx:04d}_x{x1}_y{y1}.png'),
+                    cv2.cvtColor(tile_to_save, cv2.COLOR_RGB2BGR)
+                )
+                
                 # Run inference
                 pred = self._predict_tile(tile, branch, is_mif=is_mif)
+                
+                # Save prediction
+                cv2.imwrite(
+                    str(debug_dir / f'pred_{idx:04d}_x{x1}_y{y1}.png'),
+                    (pred['seg'] * 255).astype(np.uint8)
+                )
                 
                 if save_masks or save_visualization:
                     tiles_preds_for_viz.append(pred)
                 
-                # IMMEDIATELY extract instances from this tile (CellViT style!)
+                # IMMEDIATELY extract instances from this tile
                 cells_in_tile = self.tile_processor.process_tile_instances(
                     tile_pred=pred,
                     position=position,
-                    magnification=self.magnification,
+                    magnification=magnification_to_use,
+                    mpp=mpp,
                     detection_threshold=detection_threshold,
-                    use_gpu=True  # GPU is efficient on 512x512 tiles!
+                    min_area_um=min_area_um,
+                    use_gpu=True
                 )
                 all_cells.extend(cells_in_tile)
-            
-            # Close WSI reader
-            if wsi_reader is not None:
-                wsi_reader.close()
-        
+
         self.logger.info(f"   ✓ Extracted {len(all_cells)} instances from tiles (before cleaning)")
         
         # Convert cells list to inst_info dict format

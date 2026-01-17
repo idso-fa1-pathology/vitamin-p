@@ -48,7 +48,7 @@ def get_bounding_box(img):
     return [rmin, rmax, cmin, cmax]
 
 
-def remove_small_objects(img, min_size=64):
+def remove_small_objects(img, min_size=10):
     """Remove small objects from binary image."""
     # Find all connected components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -114,17 +114,9 @@ class HVPostProcessor:
     def post_process_segmentation(
         self,
         pred_map: np.ndarray,
+        binary_threshold: float = 0.5,
     ) -> Tuple[np.ndarray, dict]:
-        """Main post-processing function
-        
-        Args:
-            pred_map (np.ndarray): Combined output with shape (H, W, 3) or (H, W, 4)
-                - If shape[2] == 3: [binary_prob, h_map, v_map]
-                - If shape[2] == 4: [type_prob, binary_prob, h_map, v_map]
-        
-        Returns:
-            Tuple[np.ndarray, dict]: Instance map and instance info dictionary
-        """
+        """Main post-processing function"""
         if pred_map.shape[2] == 4 and self.nr_types is not None:
             pred_type = pred_map[..., :1]
             pred_inst = pred_map[..., 1:]
@@ -137,17 +129,20 @@ class HVPostProcessor:
         
         # Apply HV post-processing (the main algorithm)
         instance_map = self._process_hv_maps(
-            pred_inst, object_size=self.object_size, ksize=self.k_size
+            pred_inst, 
+            object_size=self.object_size, 
+            ksize=self.k_size, 
+            binary_threshold=binary_threshold  # ← ADD THIS!
         )
 
-        # Extract instance information (with GPU acceleration and progress bar)
+        # Extract instance information
         inst_info_dict = self._extract_instance_info(instance_map, pred_type)
         
         return instance_map, inst_info_dict
 
     def _process_hv_maps(
-        self, pred: np.ndarray, object_size: int = 10, ksize: int = 21
-    ) -> np.ndarray:
+    self, pred: np.ndarray, object_size: int = 10, ksize: int = 21, binary_threshold: float = 0.5
+) -> np.ndarray:
         """Process HV maps to generate instance segmentation (GPU-accelerated)
         
         Args:
@@ -176,7 +171,7 @@ class HVPostProcessor:
         # Step 1: Process binary map (GPU-accelerated if available)
         t1 = time.time()
         if self.use_gpu:
-            blb_gpu = cp.asarray(blb_raw >= 0.5, dtype=cp.int32)
+            blb_gpu = cp.asarray(blb_raw >= binary_threshold, dtype=cp.int32)
             blb_gpu = label_cp(blb_gpu)[0]
             # DON'T transfer back yet - keep on GPU
             # blb = cp.asnumpy(blb_gpu)  # ← REMOVE THIS
@@ -184,7 +179,7 @@ class HVPostProcessor:
             # Keep blb on GPU for now
             blb_temp = blb_gpu
         else:
-            blb = np.array(blb_raw >= 0.5, dtype=np.int32)
+            blb = np.array(blb_raw >= binary_threshold, dtype=np.int32)
             blb = measurements.label(blb)[0]
             blb_temp = blb
 
@@ -425,49 +420,37 @@ def process_hv_maps(
     processor = HVPostProcessor(magnification=magnification, use_gpu=use_gpu)
     
     # Apply post-processing
-    instance_map, inst_info = processor.post_process_segmentation(pred_map)
+    instance_map, inst_info = processor.post_process_segmentation(pred_map, binary_threshold=binary_threshold)
     
     return instance_map, inst_info
-
 
 def process_model_outputs(
     seg_pred: np.ndarray,
     h_map: np.ndarray, 
     v_map: np.ndarray,
     magnification: int = 40,
+    mpp: float = 0.25,
     binary_threshold: float = 0.5,
+    min_area_um: Optional[float] = None,
     use_gpu: bool = True
 ) -> Tuple[np.ndarray, dict, int]:
     """Process model outputs using GPU-accelerated HV map post-processing
     
-    This function is designed to work with your dual-encoder model outputs.
-    
     Args:
-        seg_pred (np.ndarray): Segmentation prediction, shape (H, W)
-        h_map (np.ndarray): Horizontal direction map, shape (H, W)
-        v_map (np.ndarray): Vertical direction map, shape (H, W)
-        magnification (int): Magnification level (20 or 40)
-        binary_threshold (float): Threshold for binary segmentation
-        use_gpu (bool): Use GPU acceleration if available
+        seg_pred: Segmentation prediction, shape (H, W)
+        h_map: Horizontal direction map, shape (H, W)
+        v_map: Vertical direction map, shape (H, W)
+        magnification: Magnification level (20 or 40)
+        mpp: Microns per pixel (e.g., 0.2125, 0.25, 0.5013)
+        binary_threshold: Threshold for binary segmentation
+        min_area_um: Minimum area in μm² (e.g., 3.0 for nuclei, None to disable)
+        use_gpu: Use GPU acceleration if available
     
     Returns:
         Tuple[np.ndarray, dict, int]: Instance map, instance info, and cell/nuclei count
-    
-    Example:
-        >>> # For HE nuclei
-        >>> he_nuclei_inst, he_nuclei_info, num_he_nuclei = process_model_outputs(
-        ...     outputs['he_nuclei_seg'][0, 0].cpu().numpy(),
-        ...     outputs['he_nuclei_hv'][0, 0].cpu().numpy(),
-        ...     outputs['he_nuclei_hv'][0, 1].cpu().numpy()
-        ... )
-        >>> 
-        >>> # For HE cells
-        >>> he_cell_inst, he_cell_info, num_he_cells = process_model_outputs(
-        ...     outputs['he_cell_seg'][0, 0].cpu().numpy(),
-        ...     outputs['he_cell_hv'][0, 0].cpu().numpy(),
-        ...     outputs['he_cell_hv'][0, 1].cpu().numpy()
-        ... )
     """
+    import cv2
+    
     # Prepare input in the expected format
     pred_map = np.stack([seg_pred, h_map, v_map], axis=-1)
     
@@ -475,7 +458,38 @@ def process_model_outputs(
     processor = HVPostProcessor(magnification=magnification, use_gpu=use_gpu)
     
     # Apply post-processing
-    instance_map, inst_info = processor.post_process_segmentation(pred_map)
+    instance_map, inst_info = processor.post_process_segmentation(
+        pred_map,
+        binary_threshold=binary_threshold
+    )
+    
+    # Calculate areas and filter by size
+    if len(inst_info) > 0:
+        # Calculate min_area in pixels if specified in microns
+        min_area_pixels = None
+        if min_area_um is not None:
+            min_area_pixels = min_area_um / (mpp ** 2)
+        
+        # Process all instances - calculate areas
+        filtered_inst_info = {}
+        for inst_id, data in inst_info.items():
+            contour = data['contour']
+            area_px = cv2.contourArea(contour.reshape(-1, 1, 2).astype(np.float32))
+            area_um = area_px * (mpp ** 2)
+            
+            # Filter by size if threshold specified
+            if min_area_pixels is None or area_px >= min_area_pixels:
+                filtered_inst_info[inst_id] = data
+                filtered_inst_info[inst_id]['area_pixels'] = area_px
+                filtered_inst_info[inst_id]['area_um'] = area_um
+        
+        # Report filtering if applied
+        if min_area_um is not None:
+            removed = len(inst_info) - len(filtered_inst_info)
+            if removed > 0:
+                pass
+        
+        inst_info = filtered_inst_info
     
     # Count instances
     num_instances = len(inst_info)

@@ -275,19 +275,21 @@ class TileProcessor:
         self, 
         tile_pred, 
         position, 
-        magnification=40, 
+        magnification=40,
+        mpp=0.25,
         detection_threshold=0.5,
+        min_area_um=None,
         use_gpu=True
     ):
-        """Process a single tile to extract instances (NEW - CellViT style)
-        
-        This is the KEY function that processes each tile immediately!
+        """Process a single tile to extract instances (CellViT style)
         
         Args:
             tile_pred: Dict with 'seg' and 'hv' predictions for this tile
             position: (y1, x1, y2, x2) global position of this tile
             magnification: Magnification level (20 or 40)
+            mpp: Microns per pixel
             detection_threshold: Binary threshold
+            min_area_um: Minimum area in μm²
             use_gpu: Use GPU for post-processing
             
         Returns:
@@ -303,8 +305,10 @@ class TileProcessor:
             h_map=tile_pred['hv'][0],
             v_map=tile_pred['hv'][1],
             magnification=magnification,
+            mpp=mpp,
             binary_threshold=detection_threshold,
-            use_gpu=use_gpu  # Now we can use GPU efficiently!
+            min_area_um=min_area_um,
+            use_gpu=use_gpu
         )
         
         # Convert local coordinates to global coordinates
@@ -317,13 +321,16 @@ class TileProcessor:
                 'contour': (cell_data['contour'] + np.array([x1, y1])).tolist(),
                 'type_prob': cell_data.get('type_prob'),
                 'type': cell_data.get('type'),
-                'patch_coordinates': position,  # Store which tile this came from
+                'area_pixels': cell_data.get('area_pixels'),
+                'area_um': cell_data.get('area_um'),
+                'patch_coordinates': position,
                 'edge_position': self._is_edge_cell(cell_data['bbox'], self.tile_size, margin=self.overlap//2),
             }
             cells_global.append(cell_global)
         
         return cells_global
-    
+
+
     def _is_edge_cell(self, bbox, patch_size, margin=32):
         """Check if a cell is near the edge of a tile
         

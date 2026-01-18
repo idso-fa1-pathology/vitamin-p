@@ -179,39 +179,74 @@ class TileProcessor:
         
         return tile_mif
 
-    def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1):
-        """Extract overlapping tiles from loaded image (LEGACY - for compatibility)
+    def extract_tiles(self, image, filter_tissue=False, tissue_threshold=0.1, tissue_dilation=1, scale_factor=1.0):
+        """Extract overlapping tiles from loaded image with virtual upscaling support
         
         This method loads the full image. For streaming, use extract_tiles_streaming().
-        """
-        import cv2  # Add import
         
-        h, w = image.shape[:2]
+        Args:
+            image: Full image array (H, W, C)
+            filter_tissue: Whether to filter tiles by tissue content
+            tissue_threshold: Minimum tissue percentage (0-1)
+            tissue_dilation: Number of tiles to dilate tissue regions
+            scale_factor: Scale factor for resolution matching (virtual upscaling)
+        
+        Returns:
+            tiles: List of tile arrays (or None for filtered tiles)
+            positions: List of (y1, x1, y2, x2) positions IN ORIGINAL IMAGE SPACE
+            grid_shape: (n_tiles_h, n_tiles_w)
+            tile_mask: Boolean array indicating which tiles have tissue (None if not filtering)
+        """
+        import cv2
+        
+        # Original image dimensions
+        h_original, w_original = image.shape[:2]
+        
+        # Virtual upscaled dimensions
+        h_upscaled = int(h_original * scale_factor)
+        w_upscaled = int(w_original * scale_factor)
+        
+        if scale_factor != 1.0:
+            print(f"   Virtual upscaled size: {h_upscaled}x{w_upscaled} (from {h_original}x{w_original})")
+        
         tiles = []
         positions = []
         tile_mask = []
         
-        # Calculate number of tiles needed
-        n_tiles_h = int(np.ceil((h - self.overlap) / self.stride))
-        n_tiles_w = int(np.ceil((w - self.overlap) / self.stride))
+        # Calculate number of tiles needed IN UPSCALED SPACE
+        n_tiles_h = int(np.ceil((h_upscaled - self.overlap) / self.stride))
+        n_tiles_w = int(np.ceil((w_upscaled - self.overlap) / self.stride))
+        
+        print(f"   Scanning {n_tiles_h}x{n_tiles_w} tile grid...")
         
         for i in range(n_tiles_h):
             for j in range(n_tiles_w):
-                # Calculate tile position
-                y1 = i * self.stride
-                x1 = j * self.stride
-                y2 = min(y1 + self.tile_size, h)
-                x2 = min(x1 + self.tile_size, w)
+                # Calculate tile position IN UPSCALED SPACE
+                y1_up = i * self.stride
+                x1_up = j * self.stride
+                y2_up = min(y1_up + self.tile_size, h_upscaled)
+                x2_up = min(x1_up + self.tile_size, w_upscaled)
                 
                 # Adjust if we hit the edge
-                if y2 - y1 < self.tile_size:
-                    y1 = max(0, y2 - self.tile_size)
-                if x2 - x1 < self.tile_size:
-                    x1 = max(0, x2 - self.tile_size)
+                if y2_up - y1_up < self.tile_size:
+                    y1_up = max(0, y2_up - self.tile_size)
+                if x2_up - x1_up < self.tile_size:
+                    x1_up = max(0, x2_up - self.tile_size)
                 
-                tile = image[y1:y2, x1:x2]
+                # Convert to ORIGINAL IMAGE SPACE for extraction
+                y1_orig = int(y1_up / scale_factor)
+                x1_orig = int(x1_up / scale_factor)
+                y2_orig = int(y2_up / scale_factor)
+                x2_orig = int(x2_up / scale_factor)
                 
-                # Tissue filtering
+                # Extract tile from ORIGINAL image
+                tile = image[y1_orig:y2_orig, x1_orig:x2_orig]
+                
+                # Upscale tile to tile_size (512x512) to match training resolution
+                if tile.shape[0] != self.tile_size or tile.shape[1] != self.tile_size:
+                    tile = cv2.resize(tile, (self.tile_size, self.tile_size), interpolation=cv2.INTER_LINEAR)
+                
+                # Tissue filtering (on upscaled tile)
                 if filter_tissue:
                     tissue_pct = self._calculate_tissue_percentage(tile)
                     has_tissue = tissue_pct >= tissue_threshold
@@ -219,21 +254,15 @@ class TileProcessor:
                     
                     if not has_tissue:
                         tiles.append(None)
-                        positions.append((y1, x1, y2, x2))
+                        positions.append((y1_orig, x1_orig, y2_orig, x2_orig))
                         continue
                 else:
                     tile_mask.append(True)
                 
-                # Pad edge tiles
-                if tile.shape[0] < self.tile_size or tile.shape[1] < self.tile_size:
-                    padded = np.zeros((self.tile_size, self.tile_size, tile.shape[2]), dtype=tile.dtype)
-                    padded[:tile.shape[0], :tile.shape[1]] = tile
-                    tile = padded
-                
                 tiles.append(tile)
-                positions.append((y1, x1, y2, x2))
+                positions.append((y1_orig, x1_orig, y2_orig, x2_orig))
         
-        # 🔥 NEW: Apply morphological dilation to tissue mask (same as streaming version)
+        # Apply morphological dilation to tissue mask
         if filter_tissue and tissue_dilation > 0:
             tile_mask_2d = np.array(tile_mask, dtype=np.uint8).reshape(n_tiles_h, n_tiles_w)
             kernel_size = 2 * tissue_dilation + 1

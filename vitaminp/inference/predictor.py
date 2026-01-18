@@ -404,7 +404,8 @@ class WSIPredictor:
                 image,
                 filter_tissue=filter_tissue,
                 tissue_threshold=tissue_threshold,
-                tissue_dilation=self.tissue_dilation
+                tissue_dilation=self.tissue_dilation,
+                scale_factor=scale_factor  # ✅ ADD THIS LINE
             )
             wsi_reader = None
             image_shape = image.shape

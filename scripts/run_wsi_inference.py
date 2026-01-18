@@ -13,7 +13,7 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from vitaminp import VitaminPFlex, VitaminPDual
-from vitaminp.inference import WSIPredictor
+from vitaminp.inference import WSIPredictor, ChannelConfig  # 🔥 ADD ChannelConfig
 from vitaminp.inference.utils import setup_logger
 
 
@@ -104,7 +104,7 @@ def parse_args():
     inference_group.add_argument(
         '--patch_size',
         type=int,
-        default=1024,
+        default=512,  # 🔥 CHANGED: 1024 → 512 (matches notebook)
         help='Size of image patches/tiles'
     )
     inference_group.add_argument(
@@ -164,12 +164,35 @@ def parse_args():
         help='WSI properties as JSON string: {"slide_mpp": 0.25, "magnification": 20}'
     )
     
+    # 🔥 NEW: MIF channel configuration
+    mif_group = parser.add_argument_group('MIF channel configuration')
+    mif_group.add_argument(
+        '--mif_nuclear_channel',
+        type=int,
+        default=None,
+        help='Nuclear channel index for MIF images (e.g., 0 for SYTO13)'
+    )
+    mif_group.add_argument(
+        '--mif_membrane_channels',
+        type=str,
+        default=None,
+        help='Membrane channel indices (comma-separated, e.g., "1,2")'
+    )
+    mif_group.add_argument(
+        '--mif_membrane_combination',
+        type=str,
+        default='max',
+        choices=['max', 'mean', 'sum'],
+        help='How to combine membrane channels'
+    )
+    
     # Post-processing parameters
     postproc_group = parser.add_argument_group('post-processing')
     postproc_group.add_argument(
-        '--no_overlap_cleaning',
+        '--clean_overlaps',  # 🔥 CHANGED: from --no_overlap_cleaning to --clean_overlaps
         action='store_true',
-        help='Disable overlap cleaning (keep duplicates)'
+        default=True,  # 🔥 CHANGED: Default True (matches notebook)
+        help='Enable overlap cleaning'
     )
     postproc_group.add_argument(
         '--iou_threshold',
@@ -177,9 +200,33 @@ def parse_args():
         default=0.5,
         help='IoU threshold for overlap cleaning'
     )
+    postproc_group.add_argument(
+        '--detection_threshold',  # 🔥 NEW
+        type=float,
+        default=0.5,
+        help='Binary threshold for instance extraction (0.5-0.8)'
+    )
+    postproc_group.add_argument(
+        '--min_area_um',  # 🔥 NEW
+        type=float,
+        default=5.0,
+        help='Minimum cell area in μm² (filters small artifacts)'
+    )
     
     # Output parameters
     output_group = parser.add_argument_group('output options')
+    output_group.add_argument(
+        '--save_geojson',  # 🔥 NEW
+        action='store_true',
+        default=True,  # 🔥 Default True (matches notebook)
+        help='Save detections as GeoJSON'
+    )
+    output_group.add_argument(
+        '--save_visualization',  # 🔥 NEW
+        action='store_true',
+        default=True,  # 🔥 Default True
+        help='Save visualization with contours'
+    )
     output_group.add_argument(
         '--save_heatmap',
         action='store_true',
@@ -299,12 +346,25 @@ def main():
             logger.error(f"Invalid WSI properties JSON: {e}")
             sys.exit(1)
     
+    # 🔥 NEW: Create MIF channel config if specified
+    mif_channel_config = None
+    if args.mif_nuclear_channel is not None:
+        membrane_channels = None
+        if args.mif_membrane_channels:
+            membrane_channels = [int(ch) for ch in args.mif_membrane_channels.split(',')]
+        
+        mif_channel_config = ChannelConfig(
+            nuclear_channel=args.mif_nuclear_channel,
+            membrane_channel=membrane_channels,
+            membrane_combination=args.mif_membrane_combination
+        )
+        logger.info(f"MIF channel config: {mif_channel_config.get_description()}")
+    
     # Check CUDA availability
     if args.device == 'cuda' and not torch.cuda.is_available():
         logger.warning("CUDA not available, falling back to CPU")
         args.device = 'cpu'
     
-    # Load model
     # Load model
     try:
         model = load_model(args)
@@ -340,6 +400,7 @@ def main():
             magnification=args.magnification,
             mixed_precision=args.mixed_precision,
             logger=logger,
+            mif_channel_config=mif_channel_config,  # 🔥 NEW
             tissue_dilation=1,
         )
     except Exception as e:
@@ -357,11 +418,15 @@ def main():
                 wsi_properties=wsi_properties,
                 filter_tissue=args.filter_tissue,
                 tissue_threshold=args.tissue_threshold,
-                clean_overlaps=not args.no_overlap_cleaning,
+                clean_overlaps=args.clean_overlaps,  # 🔥 CHANGED
                 iou_threshold=args.iou_threshold,
                 save_heatmap=args.save_heatmap,
                 save_json=True,
+                save_geojson=args.save_geojson,  # 🔥 NEW
+                save_visualization=args.save_visualization,  # 🔥 NEW
                 save_csv=args.save_csv,
+                detection_threshold=args.detection_threshold,  # 🔥 NEW
+                min_area_um=args.min_area_um,  # 🔥 NEW
             )
             
             logger.info("\n" + "="*60)
@@ -393,11 +458,15 @@ def main():
                         wsi_properties=wsi_properties,
                         filter_tissue=args.filter_tissue,
                         tissue_threshold=args.tissue_threshold,
-                        clean_overlaps=not args.no_overlap_cleaning,
+                        clean_overlaps=args.clean_overlaps,  # 🔥 CHANGED
                         iou_threshold=args.iou_threshold,
                         save_heatmap=args.save_heatmap,
                         save_json=True,
+                        save_geojson=args.save_geojson,  # 🔥 NEW
+                        save_visualization=args.save_visualization,  # 🔥 NEW
                         save_csv=args.save_csv,
+                        detection_threshold=args.detection_threshold,  # 🔥 NEW
+                        min_area_um=args.min_area_um,  # 🔥 NEW
                     )
                     all_results[wsi_name] = result
                     

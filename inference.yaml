@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-inference-he-2014-0938-set1
+  name: vitamin-p-inference-he-2014-0938-set5
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -36,7 +36,7 @@ spec:
             - "--checkpoint"
             - "checkpoints/vitamin_p_flex_large_fold2_best.pth"
             - "--wsi_folder"
-            - "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 1/Images/H&Es"
+            - "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 5/Images/H&Es"
             - "--wsi_extension"
             - "svs"
             - "--output_dir"

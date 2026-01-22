@@ -34,7 +34,7 @@ def main():
                        help='Model size')
     
     parser.add_argument('--fold', type=int, required=True,
-                       choices=[1, 2, 3, 4, 5, 11, 12, 13],
+                       choices=[1, 2, 3, 4, 5, 11, 12, 13, 21],
                        help='Fold number (1-5)')
     
     parser.add_argument('--dropout', type=float, default=0.3,

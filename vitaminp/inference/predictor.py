@@ -84,7 +84,10 @@ class WSIPredictor:
         logger=None,
         mif_channel_config=None,
         tissue_dilation=1,
-        gan_checkpoint_path=None,  # ← NEW: Path to GAN checkpoint for VitaminPSyn
+        gan_checkpoint_path=None,  # ← Path to GAN checkpoint for VitaminPSyn
+        gan_use_attention=True,     # ← NEW: GAN architecture params
+        gan_use_spectral_norm=False,  # ← NEW
+        gan_n_residual_blocks=4,      # ← NEW
     ):
         """Initialize WSI Predictor
         
@@ -111,21 +114,11 @@ class WSIPredictor:
         self.magnification = magnification
         self.mixed_precision = mixed_precision
         self.tissue_dilation = tissue_dilation
+        model_class_name = type(model).__name__
         
         # 🔥 Detect model type
-        self.is_dual_model = (
-            hasattr(model, 'he_backbone') and 
-            hasattr(model, 'mif_backbone') and 
-            hasattr(model, 'shared_backbone') and
-            not hasattr(model, 'fusion_conv')  # Dual has no fusion_conv
-        )
-        
-        self.is_syn_model = (
-            hasattr(model, 'he_backbone') and 
-            hasattr(model, 'mif_backbone') and 
-            hasattr(model, 'shared_backbone') and
-            hasattr(model, 'fusion_conv')  # Syn has fusion_conv
-        )
+        self.is_dual_model = (model_class_name == 'VitaminPDual')
+        self.is_syn_model = (model_class_name == 'VitaminPSyn')
         
         # Setup logger
         if logger is None:
@@ -155,15 +148,43 @@ class WSIPredictor:
                 )
             
             self.logger.info(f"🎨 Loading GAN generator from {gan_checkpoint_path}")
-            self.gan_generator = Pix2PixGenerator(in_channels=3, out_channels=2).to(device)
             
+            # Load checkpoint first to check for saved architecture params
             checkpoint = torch.load(gan_checkpoint_path, map_location=device)
+            
+            # Try to extract architecture from checkpoint, fall back to provided params
+            if 'model_config' in checkpoint:
+                config = checkpoint['model_config']
+                use_attention = config.get('use_attention', gan_use_attention)
+                use_spectral_norm = config.get('use_spectral_norm', gan_use_spectral_norm)
+                n_residual_blocks = config.get('n_residual_blocks', gan_n_residual_blocks)
+                self.logger.info(f"   ✓ Using architecture from checkpoint metadata")
+            else:
+                use_attention = gan_use_attention
+                use_spectral_norm = gan_use_spectral_norm
+                n_residual_blocks = gan_n_residual_blocks
+                self.logger.info(f"   ⚠ No architecture metadata in checkpoint, using provided params")
+            
+            # Log architecture
+            self.logger.info(f"   Architecture: attention={use_attention}, "
+                            f"spectral_norm={use_spectral_norm}, "
+                            f"residual_blocks={n_residual_blocks}")
+            
+            # Create generator with correct architecture
+            self.gan_generator = Pix2PixGenerator(
+                in_channels=3, 
+                out_channels=2,
+                use_attention=use_attention,
+                use_spectral_norm=use_spectral_norm,
+                n_residual_blocks=n_residual_blocks
+            ).to(device)
+            
             self.gan_generator.load_state_dict(checkpoint['generator_state_dict'])
             self.gan_generator.eval()
             
             self.gan_preprocessor = GANPreprocessing()
             self.logger.info(f"   ✓ GAN generator loaded successfully")
-        
+
         self.model.eval()
         
         # Log model type
@@ -176,6 +197,8 @@ class WSIPredictor:
                 )
         elif self.is_dual_model:
             model_type = 'VitaminPDual (dual-modality)'
+            if self.gan_generator is not None:
+                self.logger.info("  (GAN loaded for synthetic MIF generation)")
         else:
             model_type = 'VitaminPFlex (single-modality)'
         
@@ -584,11 +607,9 @@ class WSIPredictor:
                 
                 # ← NEW: SYN MODEL (generate synthetic MIF)
                 elif self.is_syn_model and is_syn_branch:
-                    tile_he = self.tile_processor.read_tile(position)
+                    tile_he = self.tile_processor.read_tile(position)  # Already 512×512 ✅
                     
-                    if scale_factor != 1.0:
-                        new_size = int(self.patch_size * scale_factor)
-                        tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                    # NO resizing needed - read_tile() already returns 512×512
                     
                     # Generate synthetic MIF from H&E
                     pred = self._predict_tile(
@@ -607,10 +628,18 @@ class WSIPredictor:
                         new_size = int(self.patch_size * scale_factor)
                         tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
                     
+                    # ✅ FIX: For dual models processing H&E branches, we need MIF tile too
+                    tile_mif_to_pass = None
+                    if self.is_dual_model and use_mif_for_he:
+                        tile_mif_to_pass = self.tile_processor.read_tile_mif(position)
+                        if scale_factor != 1.0:
+                            new_size = int(self.patch_size * scale_factor)
+                            tile_mif_to_pass = cv2.resize(tile_mif_to_pass, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                    
                     pred = self._predict_tile(
                         tile_he=tile_he,
-                        tile_mif=None,
-                        branch=branch,
+                        tile_mif=tile_mif_to_pass,  # ✅ Now passes MIF tile when needed
+                        branch=actual_branch,  # ✅ Use actual_branch (converted to mif_nuclei/mif_cell)
                         is_mif=is_mif_branch,
                         is_syn=False
                     )
@@ -710,27 +739,23 @@ class WSIPredictor:
         """Generate synthetic MIF from H&E tile using GAN
         
         Args:
-            tile_he: H&E tile (H, W, 3) numpy array in [0, 1] range
+            tile_he: H&E tile (512, 512, 3) numpy array in [0, 1] range
         
         Returns:
-            Synthetic MIF tile (H, W, 2) numpy array in [0, 1] range
+            Synthetic MIF tile (512, 512, 2) numpy array in [0, 1] range
         """
-        original_size = tile_he.shape[:2]  # (H, W)
-        
-        # ← FIX: GAN was trained on 256x256 images, resize if needed
-        if tile_he.shape[0] != 256 or tile_he.shape[1] != 256:
-            tile_he_256 = cv2.resize(tile_he, (256, 256), interpolation=cv2.INTER_LINEAR)
-        else:
-            tile_he_256 = tile_he
+        # Tile is already 512×512 from read_tile()
+        assert tile_he.shape[0] == 512 and tile_he.shape[1] == 512, \
+            f"Expected 512×512 input, got {tile_he.shape}"
         
         # Convert to tensor (H, W, 3) -> (1, 3, H, W)
-        tile_he_tensor = torch.from_numpy(tile_he_256).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        tile_he_tensor = torch.from_numpy(tile_he).permute(2, 0, 1).unsqueeze(0).to(self.device)
         
         # Apply GAN preprocessing
         tile_he_norm = self.gan_preprocessor.percentile_normalize(tile_he_tensor)
         tile_he_gan_input = self.gan_preprocessor.to_gan_range(tile_he_norm)
         
-        # Generate synthetic MIF at 256x256
+        # Generate synthetic MIF (512×512 → 512×512)
         with torch.no_grad():
             fake_mif = self.gan_generator(tile_he_gan_input)
         
@@ -738,14 +763,7 @@ class WSIPredictor:
         fake_mif_01 = self.gan_preprocessor.from_gan_range(fake_mif)
         
         # Convert to numpy: (1, 2, H, W) -> (H, W, 2)
-        synthetic_mif_256 = fake_mif_01[0].permute(1, 2, 0).cpu().numpy()
-        
-        # ← FIX: Resize back to original size if needed
-        if original_size != (256, 256):
-            synthetic_mif = cv2.resize(synthetic_mif_256, (original_size[1], original_size[0]), 
-                                      interpolation=cv2.INTER_LINEAR)
-        else:
-            synthetic_mif = synthetic_mif_256
+        synthetic_mif = fake_mif_01[0].permute(1, 2, 0).cpu().numpy()
         
         return synthetic_mif
 
@@ -803,12 +821,10 @@ class WSIPredictor:
             return {'seg': seg, 'hv': hv}
         
         # ========================================================================
-        # DUAL MODEL PATH
+        # DUAL MODEL PATH (when tile_mif is provided) - ✅ FIXED CONDITION
         # ========================================================================
-        elif self.is_dual_model:
-            if tile_mif is None:
-                raise ValueError("Dual model requires both tile_he and tile_mif inputs")
-            
+        elif tile_mif is not None:
+            # ✅ FIXED: Now checks if tile_mif is provided, regardless of variable name
             # Prepare H&E tile
             if tile_he.max() > 1.0:
                 tile_he = tile_he.astype(np.float32) / 255.0
@@ -844,7 +860,7 @@ class WSIPredictor:
             return {'seg': seg, 'hv': hv}
         
         # ========================================================================
-        # SINGLE-MODALITY MODEL PATH (existing logic)
+        # SINGLE-MODALITY MODEL PATH
         # ========================================================================
         else:
             tile = tile_he
@@ -881,6 +897,7 @@ class WSIPredictor:
             hv = outputs[branch_config['hv_key']][0].cpu().numpy()
             
             return {'seg': seg, 'hv': hv}
+
 
     def _clean_overlaps(self, inst_info, iou_threshold):
         """Clean overlapping instances"""

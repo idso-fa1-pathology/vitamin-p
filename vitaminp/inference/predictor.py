@@ -542,16 +542,35 @@ class WSIPredictor:
         
         all_cells = []
         tiles_preds_for_viz = []
-        
         if tiles is not None:
             # MIF path - tiles already loaded (single-modality)
-            for idx, tile in enumerate(tqdm(positions, desc="Processing tiles")):
+            tile_idx = 0  # Counter for valid tiles
+            tiles_processed = 0  # ← ADD THIS
+            
+            for idx in tqdm(range(len(positions)), desc="Processing tiles"):
+                # Check if this position should be processed
                 if tile_mask is not None and not tile_mask[idx]:
                     tiles_preds_for_viz.append(None)
                     continue
                 
+                # Calculate grid position
+                tile_row = idx // n_w
+                tile_col = idx % n_w
+                grid_position = (tile_row, tile_col, n_h, n_w)
+                
+                # Get tile from the compacted tiles list
                 tile = tiles[idx]
+                
                 position = positions[idx]
+                
+                # Skip None tiles
+                if tile is None:
+                    tiles_preds_for_viz.append(None)
+                    continue
+                
+                # ========== ADD DEBUG HERE ==========
+                tiles_processed += 1
+
                 
                 pred = self._predict_tile(
                     tile_he=tile, 
@@ -559,7 +578,7 @@ class WSIPredictor:
                     branch=branch, 
                     is_mif=is_mif_branch,
                 )
-                
+
                 if save_masks or save_visualization:
                     tiles_preds_for_viz.append(None)
                 
@@ -571,10 +590,15 @@ class WSIPredictor:
                     detection_threshold=detection_threshold,
                     min_area_um=min_area_um,
                     use_gpu=True,
-                    scale_factor=scale_factor
+                    scale_factor=scale_factor,
+                    grid_position=grid_position,
                 )
+
                 all_cells.extend(cells_in_tile)
-                
+            
+            # ========== ADD DEBUG AFTER LOOP ==========
+            self.logger.info(f"   DEBUG: Actually processed {tiles_processed} tiles out of {len(tiles)} available")
+            # =========================================
         else:
             # Streaming path - load tiles on-demand
             for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
@@ -582,26 +606,25 @@ class WSIPredictor:
                     tiles_preds_for_viz.append(None)
                     continue
                 
+                # Calculate grid position
+                tile_row = idx // n_w
+                tile_col = idx % n_w
+                grid_position = (tile_row, tile_col, n_h, n_w)
+                
                 # DUAL MODEL
                 if self.is_dual_model:
-                    tile_he = self.tile_processor.read_tile(position)  # Always 512×512
+                    tile_he = self.tile_processor.read_tile(position)
                     
-                    # ← NEW: Generate synthetic MIF if enabled
                     if self.use_synthetic_mif:
-                        # Normalize H&E tile
                         if tile_he.max() > 1.0:
                             tile_he_normalized = tile_he.astype(np.float32) / 255.0
                         else:
                             tile_he_normalized = tile_he
                         
-                        # Generate synthetic MIF (512×512 → 512×512)
                         tile_mif = self._generate_synthetic_mif(tile_he_normalized)
-                        
-                        # Convert back to 0-255 range for consistency
                         tile_mif = (tile_mif * 255).astype(np.uint8)
                     else:
-                        # Read real MIF
-                        tile_mif = self.tile_processor.read_tile_mif(position)  # Always 512×512
+                        tile_mif = self.tile_processor.read_tile_mif(position)
                     
                     pred = self._predict_tile(
                         tile_he=tile_he,
@@ -632,10 +655,10 @@ class WSIPredictor:
                     detection_threshold=detection_threshold,
                     min_area_um=min_area_um,
                     use_gpu=True,
-                    scale_factor=scale_factor
+                    scale_factor=scale_factor,
+                    grid_position=grid_position,  # ← NEW
                 )
                 all_cells.extend(cells_in_tile)
-
         self.logger.info(f"   ✓ Extracted {len(all_cells)} instances from tiles (before cleaning)")
         
         # ========== DEBUG: Check overlap region detections ==========
@@ -656,8 +679,12 @@ class WSIPredictor:
                     break
 
         self.logger.info(f"   🔍 DEBUG: Cells near tile boundaries (within {self.overlap}px): {cells_near_boundaries}")
-        self.logger.info(f"   🔍 DEBUG: Potential overlap rate: {cells_near_boundaries/len(all_cells)*100:.1f}%")
+        if len(all_cells) > 0:
+            self.logger.info(f"   🔍 DEBUG: Potential overlap rate: {cells_near_boundaries/len(all_cells)*100:.1f}%")
+        else:
+            self.logger.info(f"   🔍 DEBUG: No cells detected")
         # ==========================================================
+        # Convert cells list to inst_info dict format
         # Convert cells list to inst_info dict format
         inst_info = {}
         for idx, cell in enumerate(all_cells, start=1):
@@ -667,6 +694,13 @@ class WSIPredictor:
                 'contour': np.array(cell['contour']),
                 'type_prob': cell.get('type_prob'),
                 'type': cell.get('type'),
+                # ========== NEW: Copy boundary flags and grid info ==========
+                'touches_top': cell.get('touches_top', False),
+                'touches_bottom': cell.get('touches_bottom', False),
+                'touches_left': cell.get('touches_left', False),
+                'touches_right': cell.get('touches_right', False),
+                'grid_info': cell.get('grid_info'),
+                # ============================================================
             }
         
         num_instances = len(inst_info)
@@ -866,61 +900,173 @@ class WSIPredictor:
             return {'seg': seg, 'hv': hv}
 
 
-
     def _clean_overlaps(self, inst_info, iou_threshold):
-        """Clean overlapping instances"""
-        # ========== DEBUG: Entry point ==========
-        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Starting with {len(inst_info)} instances")
-        self.logger.info(f"   🔍 DEBUG _clean_overlaps: IoU threshold = {iou_threshold}")
-        # =======================================
+        """Clean overlapping instances using Hard Drop + Iterative strategy
         
-        detections = []
-        inst_id_mapping = {}
+        Phase 1 (Hard Drop): Drop cells touching boundaries if neighbor tile exists
+        Phase 2 (Iterative): Clean remaining overlaps by keeping largest
+        """
+        from shapely.geometry import Polygon, MultiPolygon
+        from shapely import strtree
         
-        for idx, (inst_id, inst_data) in enumerate(inst_info.items()):
-            contour = inst_data['contour']
+        self.logger.info(f"   🔍 Starting with {len(inst_info)} instances")
+        
+        # ========== PHASE 1: HARD DROP ==========
+        self.logger.info(f"   📍 Phase 1: Hard Drop (directional boundary cleaning)")
+        
+        surviving_cells = []
+        dropped_count = 0
+        
+        for inst_id, inst_data in inst_info.items():
+            # Check if this cell should be dropped
+            grid_info = inst_data.get('grid_info')
             
-            if 'bbox' in inst_data:
-                bbox = inst_data['bbox']
+            if grid_info is None:
+                # No grid info - keep the cell (backward compatibility)
+                surviving_cells.append((inst_id, inst_data))
+                continue
+            
+            tile_row = grid_info['tile_row']
+            tile_col = grid_info['tile_col']
+            n_tiles_h = grid_info['n_tiles_h']
+            n_tiles_w = grid_info['n_tiles_w']
+            
+            drop = False
+            
+            # Check Top: if touches top AND there's a tile above, drop
+            if inst_data.get('touches_top', False) and tile_row > 0:
+                drop = True
+            
+            # Check Bottom: if touches bottom AND there's a tile below, drop
+            if inst_data.get('touches_bottom', False) and tile_row < n_tiles_h - 1:
+                drop = True
+            
+            # Check Left: if touches left AND there's a tile to the left, drop
+            if inst_data.get('touches_left', False) and tile_col > 0:
+                drop = True
+            
+            # Check Right: if touches right AND there's a tile to the right, drop
+            if inst_data.get('touches_right', False) and tile_col < n_tiles_w - 1:
+                drop = True
+            
+            if drop:
+                dropped_count += 1
             else:
-                x_coords = contour[:, 0]
-                y_coords = contour[:, 1]
-                bbox = [[x_coords.min(), y_coords.min()], [x_coords.max(), y_coords.max()]]
+                surviving_cells.append((inst_id, inst_data))
+        
+        self.logger.info(f"   ✓ Hard Drop removed {dropped_count} boundary cells")
+        self.logger.info(f"   ✓ Survivors: {len(surviving_cells)}")
+        
+        if len(surviving_cells) == 0:
+            return {}
+        
+        # ========== PHASE 2: ITERATIVE OVERLAP CLEANING ==========
+        self.logger.info(f"   🔄 Phase 2: Iterative overlap removal")
+        
+        # Prepare cells with polygons
+        current_cells = []
+        for inst_id, inst_data in surviving_cells:
+            contour = np.array(inst_data['contour'])
             
-            detection = {
-                'bbox': bbox,
-                'centroid': inst_data['centroid'].tolist() if hasattr(inst_data['centroid'], 'tolist') else inst_data['centroid'],
-                'contour': contour.tolist() if hasattr(contour, 'tolist') else contour,
-                'area': inst_data.get('area', 0),
-                'cell_status': 1
-            }
-            detections.append(detection)
-            inst_id_mapping[idx] = inst_id
+            try:
+                poly = Polygon(contour)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if isinstance(poly, MultiPolygon):
+                    poly = max(poly.geoms, key=lambda p: p.area)
+                
+                if not poly.is_empty:
+                    current_cells.append({
+                        'inst_id': inst_id,
+                        'inst_data': inst_data,
+                        'poly': poly,
+                        'area': poly.area,
+                    })
+            except:
+                # Keep cell even if polygon creation fails
+                pass
         
-        # ========== DEBUG: Before OverlapCleaner ==========
-        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Created {len(detections)} detection objects")
-        # =================================================
+        # Iterative overlap removal
+        max_iterations = 10
+        overlap_threshold = 0.01  # 1% overlap (same as your notebook)
         
-        cleaner = OverlapCleaner(
-            detections=detections,
-            logger=self.logger,
-            iou_threshold=iou_threshold,
-            max_iterations=10
-        )
-        cleaned_df = cleaner.clean()
+        for iteration in range(max_iterations):
+            if len(current_cells) == 0:
+                break
+            
+            # Build spatial index
+            geometries = [c['poly'] for c in current_cells]
+            tree = strtree.STRtree(geometries)
+            
+            to_keep = []
+            processed_indices = set()
+            overlaps_found = 0
+            
+            for i, cell in enumerate(current_cells):
+                if i in processed_indices:
+                    continue
+                
+                # Find overlapping candidates
+                candidates_idx = tree.query(cell['poly'])
+                
+                # Build cluster of overlapping cells
+                cluster = []
+                for cand_idx in candidates_idx:
+                    if cand_idx in processed_indices:
+                        continue
+                    
+                    candidate = current_cells[cand_idx]
+                    
+                    # Calculate overlap ratio (same logic as notebook)
+                    inter_area = cell['poly'].intersection(candidate['poly']).area
+                    
+                    if inter_area == 0:
+                        continue
+                    
+                    ratio_a = inter_area / cell['area']
+                    ratio_b = inter_area / candidate['area']
+                    
+                    # If overlap > threshold OR same cell, add to cluster
+                    if ratio_a > overlap_threshold or ratio_b > overlap_threshold or i == cand_idx:
+                        cluster.append((cand_idx, candidate))
+                
+                if len(cluster) == 0:
+                    # No overlaps - keep cell
+                    to_keep.append(cell)
+                    processed_indices.add(i)
+                elif len(cluster) == 1:
+                    # Only self in cluster - keep
+                    to_keep.append(cell)
+                    processed_indices.add(i)
+                else:
+                    # Multiple cells overlap - keep largest
+                    overlaps_found += 1
+                    cluster.sort(key=lambda x: x[1]['area'], reverse=True)
+                    winner = cluster[0][1]
+                    to_keep.append(winner)
+                    
+                    # Mark all as processed
+                    for idx, _ in cluster:
+                        processed_indices.add(idx)
+            
+            self.logger.info(f"      Iteration {iteration+1}: Found {overlaps_found} overlaps, kept {len(to_keep)}/{len(current_cells)}")
+            
+            if overlaps_found == 0:
+                self.logger.info(f"      ✓ Converged! No more overlaps.")
+                break
+            
+            current_cells = to_keep
         
-        # ========== DEBUG: After OverlapCleaner ==========
-        self.logger.info(f"   🔍 DEBUG _clean_overlaps: OverlapCleaner returned {len(cleaned_df)} instances")
-        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Removed {len(detections) - len(cleaned_df)} overlaps")
-        # ================================================
-        
+        # Convert back to inst_info dict
         inst_info_cleaned = {}
-        for idx in cleaned_df.index:
-            inst_info_cleaned[inst_id_mapping[idx]] = inst_info[inst_id_mapping[idx]]
+        for cell in current_cells:
+            inst_info_cleaned[cell['inst_id']] = cell['inst_data']
+        
+        self.logger.info(f"   ✅ Final count: {len(inst_info_cleaned)} instances")
         
         return inst_info_cleaned
 
-    
+
     def _save_masks(self, predictions, output_dir, object_type):
         """Save binary masks"""
         cv2.imwrite(

@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-inference-mif-2014-0938-set2
+  name: vitamin-p-inference-mif-2014-0938-set8
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -31,14 +31,14 @@ spec:
             - -c
             - |
               # Remove macOS hidden files
-              find "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 2/Images/DSP Scans" -name "._*" -type f -delete
+              find "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 8/Images/DSP Scans" -name "._*" -type f -delete
               
               # Run inference
               python scripts/run_wsi_inference.py \
                 --model_type flex \
                 --model_size large \
-                --checkpoint checkpoints/vitamin_p_flex_large_fold2_best.pth \
-                --wsi_folder "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 2/Images/DSP Scans" \
+                --checkpoint checkpoints/vitamin_p_flex_large_fold21_best.pth \
+                --wsi_folder "/rsrch9/home/plm/idso_fa1_pathology/TIER1/patient-mosaic/2014-0938/MOSAIC/DSP/MOSAIC DSP Set 8/Images/DSP Scans" \
                 --wsi_extension ome.tiff \
                 --output_dir inference_dsp/2014-0938-mif-slides \
                 --branch mif_nuclei \
@@ -53,7 +53,9 @@ spec:
                 --min_area_um 5.0 \
                 --mif_nuclear_channel 0 \
                 --mif_membrane_channels 1,2 \
-                --mif_membrane_combination max
+                --mif_membrane_combination max \
+                --filter_tissue \
+                --tissue_threshold 0.01
           workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
           env:
             - name: HOME

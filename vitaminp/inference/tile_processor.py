@@ -263,6 +263,7 @@ class TileProcessor:
                 positions.append((y1_orig, x1_orig, y2_orig, x2_orig))
         
         # Apply morphological dilation to tissue mask
+        # Apply morphological dilation to tissue mask
         if filter_tissue and tissue_dilation > 0:
             tile_mask_2d = np.array(tile_mask, dtype=np.uint8).reshape(n_tiles_h, n_tiles_w)
             kernel_size = 2 * tissue_dilation + 1
@@ -272,21 +273,59 @@ class TileProcessor:
             # Update tile_mask and tiles list
             tile_mask_new = tile_mask_dilated.flatten().tolist()
             
-            # Add None tiles that were dilated in
+            # ========== FIX: Load tiles that were added by dilation ==========
             tiles_updated = []
-            for idx, (old_mask, new_mask) in enumerate(zip(tile_mask, tile_mask_new)):
+            
+            for flat_idx, (old_mask, new_mask) in enumerate(zip(tile_mask, tile_mask_new)):
                 if old_mask:
-                    tiles_updated.append(tiles[sum(tile_mask[:idx])])
-                elif new_mask:  # Newly included by dilation
-                    tiles_updated.append(None)  # Will be loaded later
+                    # This tile was already in the original list
+                    # FIX: Use flat_idx directly because 'tiles' list matches the grid 1:1
+                    tiles_updated.append(tiles[flat_idx])
                 
+                elif new_mask:
+                    # This tile was added by dilation - extract it from image!
+                    i = flat_idx // n_tiles_w
+                    j = flat_idx % n_tiles_w
+                    
+                    # Calculate tile position IN UPSCALED SPACE
+                    y1_up = i * self.stride
+                    x1_up = j * self.stride
+                    y2_up = min(y1_up + self.tile_size, h_upscaled)
+                    x2_up = min(x1_up + self.tile_size, w_upscaled)
+                    
+                    # Adjust if we hit the edge
+                    if y2_up - y1_up < self.tile_size:
+                        y1_up = max(0, y2_up - self.tile_size)
+                    if x2_up - x1_up < self.tile_size:
+                        x1_up = max(0, x2_up - self.tile_size)
+                    
+                    # Convert to ORIGINAL IMAGE SPACE for extraction
+                    y1_orig = int(y1_up / scale_factor)
+                    x1_orig = int(x1_up / scale_factor)
+                    y2_orig = int(y2_up / scale_factor)
+                    x2_orig = int(x2_up / scale_factor)
+                    
+                    # Extract tile from ORIGINAL image
+                    tile = image[y1_orig:y2_orig, x1_orig:x2_orig]
+                    
+                    # Upscale tile to tile_size (512x512)
+                    if tile.shape[0] != self.tile_size or tile.shape[1] != self.tile_size:
+                        tile = cv2.resize(tile, (self.tile_size, self.tile_size), interpolation=cv2.INTER_LINEAR)
+                    
+                    tiles_updated.append(tile)
+                
+                else:
+                    # FIX: You MUST append None for background tiles to keep the list aligned!
+                    tiles_updated.append(None)
+            # ==================================================================
+            
             tiles = tiles_updated
             tile_mask = tile_mask_new
             
             n_original = sum(np.array(tile_mask_2d).flatten())
             n_dilated = sum(tile_mask)
             print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
-        
+                
         return tiles, positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
 
     def _calculate_tissue_percentage(self, tile):
@@ -343,7 +382,6 @@ class TileProcessor:
         tissue_pct = np.sum(binary > 0) / binary.size
         
         return tissue_pct
-
     def process_tile_instances(
         self, 
         tile_pred, 
@@ -353,7 +391,8 @@ class TileProcessor:
         detection_threshold=0.5,
         min_area_um=None,
         use_gpu=True,
-        scale_factor=1.0
+        scale_factor=1.0,
+        grid_position=None,  # ← NEW: (tile_row, tile_col, n_tiles_h, n_tiles_w)
     ):
         """Process a single tile to extract instances (CellViT style)
         
@@ -366,6 +405,7 @@ class TileProcessor:
             min_area_um: Minimum area in μm²
             use_gpu: Use GPU for post-processing
             scale_factor: Scale factor applied to tile before inference
+            grid_position: Tuple of (tile_row, tile_col, n_tiles_h, n_tiles_w) for boundary detection
             
         Returns:
             List of cell dictionaries with GLOBAL coordinates
@@ -389,7 +429,7 @@ class TileProcessor:
         # Convert local coordinates to global coordinates
         cells_global = []
         for inst_id, cell_data in inst_info.items():
-            # 🔥 STEP 3: Downscale coordinates back to original space
+            # Downscale coordinates if needed
             if scale_factor != 1.0:
                 bbox_local = cell_data['bbox'] / scale_factor
                 centroid_local = cell_data['centroid'] / scale_factor
@@ -399,21 +439,51 @@ class TileProcessor:
                 centroid_local = cell_data['centroid']
                 contour_local = cell_data['contour']
             
-            # Then adjust from tile-local to WSI-global
+            # ========== NEW: DIRECTIONAL BOUNDARY DETECTION ==========
+            # Check which boundaries this cell touches (2px margin for safety)
+            lx_min = np.min(contour_local[:, 0])
+            lx_max = np.max(contour_local[:, 0])
+            ly_min = np.min(contour_local[:, 1])
+            ly_max = np.max(contour_local[:, 1])
+            
+            touches_top = (ly_min <= 2)
+            touches_bottom = (ly_max >= self.tile_size - 3)
+            touches_left = (lx_min <= 2)
+            touches_right = (lx_max >= self.tile_size - 3)
+            
+            # Store grid position if provided
+            grid_info = None
+            if grid_position is not None:
+                tile_row, tile_col, n_tiles_h, n_tiles_w = grid_position
+                grid_info = {
+                    'tile_row': tile_row,
+                    'tile_col': tile_col,
+                    'n_tiles_h': n_tiles_h,
+                    'n_tiles_w': n_tiles_w,
+                }
+            # =========================================================
+            
+            # Adjust from tile-local to WSI-global
             cell_global = {
                 'bbox': (bbox_local + np.array([[y1, x1], [y1, x1]])).astype(np.float32).tolist(),
                 'centroid': (centroid_local + np.array([x1, y1])).astype(np.float32).tolist(),
-                'contour': (contour_local + np.array([x1, y1])).astype(np.int32).tolist(),  # Convert to int32 for OpenCV
+                'contour': (contour_local + np.array([x1, y1])).astype(np.int32).tolist(),
                 'type_prob': cell_data.get('type_prob'),
                 'type': cell_data.get('type'),
                 'area_pixels': cell_data.get('area_pixels'),
                 'area_um': cell_data.get('area_um'),
                 'patch_coordinates': position,
-                'edge_position': self._is_edge_cell(bbox_local, self.tile_size, margin=self.overlap//2),
+                # NEW: Directional boundary flags
+                'touches_top': touches_top,
+                'touches_bottom': touches_bottom,
+                'touches_left': touches_left,
+                'touches_right': touches_right,
+                'grid_info': grid_info,
             }
             cells_global.append(cell_global)
         
         return cells_global
+
 
     def _is_edge_cell(self, bbox, patch_size, margin=32):
         """Check if a cell is near the edge of a tile

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """WSI Predictor - High-level interface for whole slide inference with per-tile processing.
 
-NOW SUPPORTS VITAMINPSYN with seamless synthetic MIF generation!
+NOW SUPPORTS VitaminPDual with optional synthetic MIF generation!
 """
 
 import time
@@ -30,7 +30,7 @@ class WSIPredictor:
     2. Tile extraction positions
     3. FOR EACH TILE:
        a. Load tile on-demand
-       b. [SYN ONLY] Generate synthetic MIF from H&E using GAN
+       b. [OPTIONAL] Generate synthetic MIF from H&E using GAN
        c. Run model inference
        d. IMMEDIATELY extract instances (512x512 - FAST!)
        e. Convert coordinates to global
@@ -48,16 +48,27 @@ class WSIPredictor:
         ...     save_geojson=True
         ... )
         
-        >>> # VitaminPSyn (H&E → Synthetic MIF → Segmentation)
-        >>> model = VitaminPSyn(model_size='base').to('cuda')
+        >>> # VitaminPDual with real MIF
+        >>> model = VitaminPDual(model_size='base').to('cuda')
+        >>> predictor = WSIPredictor(model=model, device='cuda')
+        >>> results = predictor.predict(
+        ...     wsi_path='he_slide.svs',
+        ...     wsi_path_mif='mif_slide.ome.tiff',
+        ...     branches=['he_nuclei', 'he_cell'],
+        ...     save_geojson=True
+        ... )
+        
+        >>> # VitaminPDual with synthetic MIF (H&E only!)
+        >>> model = VitaminPDual(model_size='base').to('cuda')
         >>> predictor = WSIPredictor(
         ...     model=model, 
         ...     device='cuda',
-        ...     gan_checkpoint_path='checkpoints/pix2pix_he_to_mif_best.pth'
+        ...     gan_checkpoint_path='checkpoints/pix2pix_he_to_mif_best.pth',
+        ...     use_synthetic_mif=True  # ← Auto-generate synthetic MIF!
         ... )
         >>> results = predictor.predict(
-        ...     wsi_path='he_slide.svs',
-        ...     branch='syn_nuclei',  # ← Automatically generates synthetic MIF!
+        ...     wsi_path='he_slide.svs',  # ← Only H&E needed!
+        ...     branches=['he_nuclei', 'he_cell'],
         ...     save_geojson=True
         ... )
     """
@@ -67,8 +78,6 @@ class WSIPredictor:
         'he_cell': {'seg_key': 'he_cell_seg', 'hv_key': 'he_cell_hv'},
         'mif_nuclei': {'seg_key': 'mif_nuclei_seg', 'hv_key': 'mif_nuclei_hv'},
         'mif_cell': {'seg_key': 'mif_cell_seg', 'hv_key': 'mif_cell_hv'},
-        'syn_nuclei': {'seg_key': 'mif_nuclei_seg', 'hv_key': 'mif_nuclei_hv'},  # ← NEW: Uses MIF outputs
-        'syn_cell': {'seg_key': 'mif_cell_seg', 'hv_key': 'mif_cell_hv'},        # ← NEW: Uses MIF outputs
     }
     
     def __init__(
@@ -84,15 +93,16 @@ class WSIPredictor:
         logger=None,
         mif_channel_config=None,
         tissue_dilation=1,
-        gan_checkpoint_path=None,  # ← Path to GAN checkpoint for VitaminPSyn
-        gan_use_attention=True,     # ← NEW: GAN architecture params
-        gan_use_spectral_norm=False,  # ← NEW
-        gan_n_residual_blocks=4,      # ← NEW
+        gan_checkpoint_path=None,
+        gan_use_attention=True,
+        gan_use_spectral_norm=False,
+        gan_n_residual_blocks=4,
+        use_synthetic_mif=False,  # ← NEW parameter
     ):
         """Initialize WSI Predictor
         
         Args:
-            model: Loaded model instance (VitaminPFlex, VitaminPDual, or VitaminPSyn)
+            model: Loaded model instance (VitaminPFlex or VitaminPDual)
             checkpoint_path: Path to checkpoint (optional, for reference)
             device: Device for inference ('cuda' or 'cpu')
             patch_size: Tile size (must match training)
@@ -103,7 +113,11 @@ class WSIPredictor:
             logger: Logger instance (creates one if None)
             mif_channel_config: MIF channel configuration
             tissue_dilation: Number of tiles to dilate tissue regions
-            gan_checkpoint_path: Path to GAN checkpoint (required for VitaminPSyn with syn_* branches)
+            gan_checkpoint_path: Path to GAN checkpoint for synthetic MIF generation
+            gan_use_attention: GAN architecture parameter
+            gan_use_spectral_norm: GAN architecture parameter
+            gan_n_residual_blocks: GAN architecture parameter
+            use_synthetic_mif: If True, generate synthetic MIF from H&E (VitaminPDual only)
         """
         self.model = model
         self.checkpoint_path = checkpoint_path
@@ -114,11 +128,24 @@ class WSIPredictor:
         self.magnification = magnification
         self.mixed_precision = mixed_precision
         self.tissue_dilation = tissue_dilation
+        self.use_synthetic_mif = use_synthetic_mif
+        
         model_class_name = type(model).__name__
         
         # 🔥 Detect model type
         self.is_dual_model = (model_class_name == 'VitaminPDual')
-        self.is_syn_model = (model_class_name == 'VitaminPSyn')
+        
+        # Validate synthetic MIF usage
+        if use_synthetic_mif and not self.is_dual_model:
+            raise ValueError(
+                "use_synthetic_mif=True requires VitaminPDual model. "
+                f"Current model is {model_class_name}"
+            )
+        
+        if use_synthetic_mif and gan_checkpoint_path is None:
+            raise ValueError(
+                "use_synthetic_mif=True requires gan_checkpoint_path to be provided."
+            )
         
         # Setup logger
         if logger is None:
@@ -136,17 +163,11 @@ class WSIPredictor:
         )
         self.preprocessor = SimplePreprocessing()
         
-        # ========== GAN SETUP FOR VITAMINPSYN ==========
+        # ========== GAN SETUP FOR SYNTHETIC MIF ==========
         self.gan_generator = None
         self.gan_preprocessor = None
         
         if gan_checkpoint_path is not None:
-            if not self.is_syn_model:
-                self.logger.warning(
-                    "gan_checkpoint_path provided but model is not VitaminPSyn. "
-                    "GAN will be loaded but not used."
-                )
-            
             self.logger.info(f"🎨 Loading GAN generator from {gan_checkpoint_path}")
             
             # Load checkpoint first to check for saved architecture params
@@ -188,17 +209,11 @@ class WSIPredictor:
         self.model.eval()
         
         # Log model type
-        if self.is_syn_model:
-            model_type = 'VitaminPSyn (H&E + Synthetic MIF)'
-            if self.gan_generator is None:
-                self.logger.warning(
-                    "⚠️ VitaminPSyn detected but no GAN checkpoint provided. "
-                    "You must provide gan_checkpoint_path to use syn_* branches."
-                )
-        elif self.is_dual_model:
-            model_type = 'VitaminPDual (dual-modality)'
-            if self.gan_generator is not None:
-                self.logger.info("  (GAN loaded for synthetic MIF generation)")
+        if self.is_dual_model:
+            if use_synthetic_mif:
+                model_type = 'VitaminPDual (dual-modality with synthetic MIF generation)'
+            else:
+                model_type = 'VitaminPDual (dual-modality)'
         else:
             model_type = 'VitaminPFlex (single-modality)'
         
@@ -208,6 +223,8 @@ class WSIPredictor:
         self.logger.info(f"  Patch size: {patch_size}")
         self.logger.info(f"  Overlap: {overlap}")
         self.logger.info(f"  Magnification: {magnification}")
+        if use_synthetic_mif:
+            self.logger.info(f"  Synthetic MIF: Enabled")
         self.mif_channel_config = mif_channel_config
         if mif_channel_config is not None:
             self.logger.info(f"  MIF channels: {mif_channel_config.get_description()}")
@@ -215,7 +232,7 @@ class WSIPredictor:
     def predict(
         self,
         wsi_path,
-        wsi_path_mif=None,  # For dual models only
+        wsi_path_mif=None,
         output_dir='results',
         branch='he_nuclei',
         branches=None,
@@ -238,10 +255,10 @@ class WSIPredictor:
         
         Args:
             wsi_path: Path to H&E WSI (or MIF for Flex model)
-            wsi_path_mif: Path to co-registered MIF WSI (required for dual models only)
+            wsi_path_mif: Path to co-registered MIF WSI (required for dual models unless use_synthetic_mif=True)
             output_dir: Output directory
             branch: Single branch to process (ignored if branches is provided)
-            branches: List of branches to process (e.g., ['he_nuclei', 'syn_nuclei'])
+            branches: List of branches to process (e.g., ['he_nuclei', 'he_cell'])
             wsi_properties: WSI metadata (optional)
             filter_tissue: Filter tiles by tissue content
             tissue_threshold: Minimum tissue percentage (0-1)
@@ -263,13 +280,13 @@ class WSIPredictor:
         start_time = time.time()
         
         # Validate dual model usage
-        if self.is_dual_model and wsi_path_mif is None:
+        if self.is_dual_model and wsi_path_mif is None and not self.use_synthetic_mif:
             raise ValueError(
                 "This is a dual model (VitaminPDual) which requires both H&E and MIF inputs. "
-                "Please provide wsi_path_mif parameter."
+                "Please provide wsi_path_mif parameter OR set use_synthetic_mif=True when initializing WSIPredictor."
             )
         
-        if not self.is_dual_model and not self.is_syn_model and wsi_path_mif is not None:
+        if not self.is_dual_model and wsi_path_mif is not None:
             self.logger.warning(
                 "wsi_path_mif provided but model is single-modality (VitaminPFlex). "
                 "MIF image will be ignored."
@@ -286,19 +303,6 @@ class WSIPredictor:
         for b in branch_list:
             if b not in self.SUPPORTED_BRANCHES:
                 raise ValueError(f"Unsupported branch: {b}. Choose from {list(self.SUPPORTED_BRANCHES.keys())}")
-            
-            # ← NEW: Validate syn branches
-            if b.startswith('syn_'):
-                if not self.is_syn_model:
-                    raise ValueError(
-                        f"Branch '{b}' requires VitaminPSyn model, but current model is "
-                        f"{'VitaminPDual' if self.is_dual_model else 'VitaminPFlex'}"
-                    )
-                if self.gan_generator is None:
-                    raise ValueError(
-                        f"Branch '{b}' requires GAN generator. Please provide gan_checkpoint_path "
-                        "when initializing WSIPredictor."
-                    )
         
         # Process single or multiple branches
         if len(branch_list) == 1:
@@ -375,13 +379,12 @@ class WSIPredictor:
         
         # Detect branch type
         is_mif_branch = 'mif' in branch.lower()
-        is_syn_branch = branch.startswith('syn_')  # ← NEW
         
         # Use MIF predictions for H&E branches in DUAL models only
         use_mif_for_he = False
         actual_branch = branch
         
-        if self.is_dual_model and not is_mif_branch and wsi_path_mif is not None:
+        if self.is_dual_model and not is_mif_branch and (wsi_path_mif is not None or self.use_synthetic_mif):
             use_mif_for_he = True
             actual_branch = branch.replace('he_', 'mif_')
             self.logger.info(f"🔄 Using MIF predictions for {branch} (better quality)")
@@ -433,23 +436,35 @@ class WSIPredictor:
         # DUAL MODEL BRANCH
         # ========================================================================
         if self.is_dual_model:
-            self.logger.info(f"📁 Opening dual WSI pair:")
-            self.logger.info(f"   H&E: {wsi_path}")
-            self.logger.info(f"   MIF: {wsi_path_mif}")
-            
-            wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
-            self.logger.info(f"   ✓ H&E Size: {wsi_reader_he.width}x{wsi_reader_he.height} pixels")
-            
-            image_mif = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
-            image_mif = np.transpose(image_mif, (1, 2, 0))
-            self.logger.info(f"   ✓ MIF Size: {image_mif.shape[0]}x{image_mif.shape[1]} pixels, {image_mif.shape[2]} channels")
-            
-            if wsi_reader_he.height != image_mif.shape[0] or wsi_reader_he.width != image_mif.shape[1]:
-                raise ValueError(
-                    f"H&E and MIF images are not aligned! "
-                    f"H&E: {wsi_reader_he.height}x{wsi_reader_he.width}, "
-                    f"MIF: {image_mif.shape[0]}x{image_mif.shape[1]}"
-                )
+            if self.use_synthetic_mif:
+                # Synthetic MIF mode - only H&E needed
+                self.logger.info(f"📁 Opening H&E WSI (will generate synthetic MIF):")
+                self.logger.info(f"   H&E: {wsi_path}")
+                
+                wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
+                self.logger.info(f"   ✓ H&E Size: {wsi_reader_he.width}x{wsi_reader_he.height} pixels")
+                
+                # No MIF image to load - will generate per-tile
+                image_mif = None
+            else:
+                # Real MIF mode - load both H&E and MIF
+                self.logger.info(f"📁 Opening dual WSI pair:")
+                self.logger.info(f"   H&E: {wsi_path}")
+                self.logger.info(f"   MIF: {wsi_path_mif}")
+                
+                wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
+                self.logger.info(f"   ✓ H&E Size: {wsi_reader_he.width}x{wsi_reader_he.height} pixels")
+                
+                image_mif = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
+                image_mif = np.transpose(image_mif, (1, 2, 0))
+                self.logger.info(f"   ✓ MIF Size: {image_mif.shape[0]}x{image_mif.shape[1]} pixels, {image_mif.shape[2]} channels")
+                
+                if wsi_reader_he.height != image_mif.shape[0] or wsi_reader_he.width != image_mif.shape[1]:
+                    raise ValueError(
+                        f"H&E and MIF images are not aligned! "
+                        f"H&E: {wsi_reader_he.height}x{wsi_reader_he.width}, "
+                        f"MIF: {image_mif.shape[0]}x{image_mif.shape[1]}"
+                    )
             
             self.logger.info(f"📐 Extracting tile positions...")
             positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
@@ -460,32 +475,13 @@ class WSIPredictor:
                 scale_factor=scale_factor
             )
             
-            self.tile_processor.mif_image = image_mif
+            if image_mif is not None:
+                self.tile_processor.mif_image = image_mif
             
             wsi_reader = wsi_reader_he
             image_shape = (wsi_reader_he.height, wsi_reader_he.width, 3)
             image = None
             tiles = None
-        
-        # ========================================================================
-        # ← NEW: SYN MODEL BRANCH (H&E → Synthetic MIF)
-        # ========================================================================
-        elif self.is_syn_model and is_syn_branch:
-            self.logger.info(f"🎨 Opening H&E WSI for synthetic MIF generation: {wsi_path}")
-            wsi_reader = self.wsi_handler.get_wsi_reader(wsi_path)
-            self.logger.info(f"   ✓ Size: {wsi_reader.width}x{wsi_reader.height} pixels")
-            
-            self.logger.info(f"📐 Extracting tile positions...")
-            positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
-                wsi_reader,
-                filter_tissue=filter_tissue,
-                tissue_threshold=tissue_threshold,
-                tissue_dilation=self.tissue_dilation,
-                scale_factor=scale_factor
-            )
-            tiles = None
-            image_shape = (wsi_reader.height, wsi_reader.width, 3)
-            image = None
         
         # ========================================================================
         # MIF BRANCH (single-modality)
@@ -562,7 +558,6 @@ class WSIPredictor:
                     tile_mif=None,
                     branch=branch, 
                     is_mif=is_mif_branch,
-                    is_syn=False
                 )
                 
                 if save_masks or save_visualization:
@@ -589,59 +584,41 @@ class WSIPredictor:
                 
                 # DUAL MODEL
                 if self.is_dual_model:
-                    tile_he = self.tile_processor.read_tile(position)
-                    tile_mif = self.tile_processor.read_tile_mif(position)
+                    tile_he = self.tile_processor.read_tile(position)  # Always 512×512
                     
-                    if scale_factor != 1.0:
-                        new_size = int(self.patch_size * scale_factor)
-                        tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
-                        tile_mif = cv2.resize(tile_mif, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
+                    # ← NEW: Generate synthetic MIF if enabled
+                    if self.use_synthetic_mif:
+                        # Normalize H&E tile
+                        if tile_he.max() > 1.0:
+                            tile_he_normalized = tile_he.astype(np.float32) / 255.0
+                        else:
+                            tile_he_normalized = tile_he
+                        
+                        # Generate synthetic MIF (512×512 → 512×512)
+                        tile_mif = self._generate_synthetic_mif(tile_he_normalized)
+                        
+                        # Convert back to 0-255 range for consistency
+                        tile_mif = (tile_mif * 255).astype(np.uint8)
+                    else:
+                        # Read real MIF
+                        tile_mif = self.tile_processor.read_tile_mif(position)  # Always 512×512
                     
                     pred = self._predict_tile(
                         tile_he=tile_he,
                         tile_mif=tile_mif,
                         branch=actual_branch,
                         is_mif=is_mif_branch,
-                        is_syn=False
-                    )
-                
-                # ← NEW: SYN MODEL (generate synthetic MIF)
-                elif self.is_syn_model and is_syn_branch:
-                    tile_he = self.tile_processor.read_tile(position)  # Already 512×512 ✅
-                    
-                    # NO resizing needed - read_tile() already returns 512×512
-                    
-                    # Generate synthetic MIF from H&E
-                    pred = self._predict_tile(
-                        tile_he=tile_he,
-                        tile_mif=None,  # Will be generated inside
-                        branch=branch,
-                        is_mif=False,
-                        is_syn=True  # ← Triggers synthetic MIF generation
                     )
                 
                 # SINGLE-MODALITY H&E
                 else:
                     tile_he = self.tile_processor.read_tile(position)
                     
-                    if scale_factor != 1.0:
-                        new_size = int(self.patch_size * scale_factor)
-                        tile_he = cv2.resize(tile_he, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
-                    
-                    # ✅ FIX: For dual models processing H&E branches, we need MIF tile too
-                    tile_mif_to_pass = None
-                    if self.is_dual_model and use_mif_for_he:
-                        tile_mif_to_pass = self.tile_processor.read_tile_mif(position)
-                        if scale_factor != 1.0:
-                            new_size = int(self.patch_size * scale_factor)
-                            tile_mif_to_pass = cv2.resize(tile_mif_to_pass, (new_size, new_size), interpolation=cv2.INTER_LINEAR)
-                    
                     pred = self._predict_tile(
                         tile_he=tile_he,
-                        tile_mif=tile_mif_to_pass,  # ✅ Now passes MIF tile when needed
-                        branch=actual_branch,  # ✅ Use actual_branch (converted to mif_nuclei/mif_cell)
+                        tile_mif=None,
+                        branch=branch,
                         is_mif=is_mif_branch,
-                        is_syn=False
                     )
                 
                 if save_masks or save_visualization:
@@ -661,6 +638,26 @@ class WSIPredictor:
 
         self.logger.info(f"   ✓ Extracted {len(all_cells)} instances from tiles (before cleaning)")
         
+        # ========== DEBUG: Check overlap region detections ==========
+        self.logger.info(f"   🔍 DEBUG: Tile configuration:")
+        self.logger.info(f"      - Tile size: {self.patch_size}px")
+        self.logger.info(f"      - Overlap: {self.overlap}px")
+        self.logger.info(f"      - Grid: {n_h}x{n_w} tiles")
+
+        # Check how many cells are near tile boundaries
+        cells_near_boundaries = 0
+        for cell in all_cells:
+            centroid = cell['centroid']
+            # Check if within overlap distance of any tile boundary
+            for dim in [0, 1]:  # x and y
+                if centroid[dim] % self.patch_size < self.overlap or \
+                centroid[dim] % self.patch_size > (self.patch_size - self.overlap):
+                    cells_near_boundaries += 1
+                    break
+
+        self.logger.info(f"   🔍 DEBUG: Cells near tile boundaries (within {self.overlap}px): {cells_near_boundaries}")
+        self.logger.info(f"   🔍 DEBUG: Potential overlap rate: {cells_near_boundaries/len(all_cells)*100:.1f}%")
+        # ==========================================================
         # Convert cells list to inst_info dict format
         inst_info = {}
         for idx, cell in enumerate(all_cells, start=1):
@@ -677,13 +674,25 @@ class WSIPredictor:
         # Clean overlaps
         if clean_overlaps and len(inst_info) > 0:
             self.logger.info(f"🧹 Cleaning overlapping instances at tile boundaries...")
-            edge_cells = [cell for cell in all_cells if cell.get('edge_position', False)]
-            self.logger.info(f"   Found {len(edge_cells)} edge cells to check for overlaps")
             
+            # ========== DEBUG: Check edge_cells ==========
+            edge_cells = [cell for cell in all_cells if cell.get('edge_position', False)]
+            self.logger.info(f"   🔍 DEBUG: Total cells before cleaning: {len(inst_info)}")
+            self.logger.info(f"   🔍 DEBUG: Edge cells found: {len(edge_cells)}")
+            self.logger.info(f"   🔍 DEBUG: Will clean ALL instances (not just edge cells)")
+            # ============================================
+            
+            before_count = len(inst_info)
             inst_info = self._clean_overlaps(inst_info, iou_threshold)
             num_instances = len(inst_info)
+            
+            # ========== DEBUG: Cleaning results ==========
+            removed = before_count - num_instances
+            self.logger.info(f"   🔍 DEBUG: Instances removed by cleaning: {removed}")
+            self.logger.info(f"   🔍 DEBUG: Cleaning rate: {removed/before_count*100:.1f}%")
+            # ============================================
+            
             self.logger.info(f"   ✓ After cleaning: {num_instances} instances")
-        
         # Save results
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
@@ -767,7 +776,7 @@ class WSIPredictor:
         
         return synthetic_mif
 
-    def _predict_tile(self, tile_he, tile_mif=None, branch='he_nuclei', is_mif=False, is_syn=False):
+    def _predict_tile(self, tile_he, tile_mif=None, branch='he_nuclei', is_mif=False):
         """Run inference on a single tile
         
         Args:
@@ -775,56 +784,14 @@ class WSIPredictor:
             tile_mif: MIF tile image (H, W, 2) - 2-channel (nuclear, membrane) [optional]
             branch: Branch name
             is_mif: Whether this is MIF data (affects preprocessing for single-modality)
-            is_syn: Whether to generate synthetic MIF from H&E (for VitaminPSyn)
         
         Returns:
             dict: Predictions with 'seg' and 'hv' keys
         """
         # ========================================================================
-        # ← NEW: SYN MODEL PATH (H&E → Synthetic MIF → Segmentation)
+        # DUAL MODEL PATH (when tile_mif is provided)
         # ========================================================================
-        if self.is_syn_model and is_syn:
-            # Prepare H&E tile
-            if tile_he.max() > 1.0:
-                tile_he = tile_he.astype(np.float32) / 255.0
-            
-            # ← Generate synthetic MIF from H&E
-            synthetic_mif = self._generate_synthetic_mif(tile_he)
-            
-            # Prepare H&E tensor
-            tile_he_tensor = torch.from_numpy(tile_he).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            
-            # Prepare synthetic MIF tensor (H, W, 2) -> (1, 2, H, W)
-            tile_mif_tensor = torch.from_numpy(synthetic_mif).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            
-            # Apply preprocessing
-            from vitaminp import prepare_he_input
-            tile_he_tensor = prepare_he_input(tile_he_tensor)
-            
-            # Apply normalization
-            tile_he_tensor = self.preprocessor.percentile_normalize(tile_he_tensor)
-            tile_mif_tensor = self.preprocessor.percentile_normalize(tile_mif_tensor)
-            
-            # Predict with BOTH inputs
-            with torch.no_grad():
-                if self.mixed_precision:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(tile_he_tensor, tile_mif_tensor)
-                else:
-                    outputs = self.model(tile_he_tensor, tile_mif_tensor)
-            
-            # Extract branch outputs
-            branch_config = self.SUPPORTED_BRANCHES[branch]
-            seg = outputs[branch_config['seg_key']][0, 0].cpu().numpy()
-            hv = outputs[branch_config['hv_key']][0].cpu().numpy()
-            
-            return {'seg': seg, 'hv': hv}
-        
-        # ========================================================================
-        # DUAL MODEL PATH (when tile_mif is provided) - ✅ FIXED CONDITION
-        # ========================================================================
-        elif tile_mif is not None:
-            # ✅ FIXED: Now checks if tile_mif is provided, regardless of variable name
+        if tile_mif is not None:
             # Prepare H&E tile
             if tile_he.max() > 1.0:
                 tile_he = tile_he.astype(np.float32) / 255.0
@@ -899,8 +866,14 @@ class WSIPredictor:
             return {'seg': seg, 'hv': hv}
 
 
+
     def _clean_overlaps(self, inst_info, iou_threshold):
         """Clean overlapping instances"""
+        # ========== DEBUG: Entry point ==========
+        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Starting with {len(inst_info)} instances")
+        self.logger.info(f"   🔍 DEBUG _clean_overlaps: IoU threshold = {iou_threshold}")
+        # =======================================
+        
         detections = []
         inst_id_mapping = {}
         
@@ -924,6 +897,10 @@ class WSIPredictor:
             detections.append(detection)
             inst_id_mapping[idx] = inst_id
         
+        # ========== DEBUG: Before OverlapCleaner ==========
+        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Created {len(detections)} detection objects")
+        # =================================================
+        
         cleaner = OverlapCleaner(
             detections=detections,
             logger=self.logger,
@@ -932,11 +909,17 @@ class WSIPredictor:
         )
         cleaned_df = cleaner.clean()
         
+        # ========== DEBUG: After OverlapCleaner ==========
+        self.logger.info(f"   🔍 DEBUG _clean_overlaps: OverlapCleaner returned {len(cleaned_df)} instances")
+        self.logger.info(f"   🔍 DEBUG _clean_overlaps: Removed {len(detections) - len(cleaned_df)} overlaps")
+        # ================================================
+        
         inst_info_cleaned = {}
         for idx in cleaned_df.index:
             inst_info_cleaned[inst_id_mapping[idx]] = inst_info[inst_id_mapping[idx]]
         
         return inst_info_cleaned
+
     
     def _save_masks(self, predictions, output_dir, object_type):
         """Save binary masks"""

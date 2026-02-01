@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vitamin-p-flex-base-fold21  # Updated name to reflect syn model
+  namespace: yn-gpu-workload
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+      securityContext:
+        runAsUser: 297724
+        runAsGroup: 1944303352
+        fsGroup: 1944303352
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: '1000Gi'
+        - name: program
+          persistentVolumeClaim:
+            claimName: yshokrollahi-gpu-rsrch9-home-plm
+      containers:
+        - name: training-container
+          image: hpcharbor.mdanderson.edu/yshokrollahi/vitamin-p:latest
+          command: 
+            - "python"
+            - "scripts/train.py"
+            - "--model"
+            - "flex"      # Model type: dual, syn, flex, baseline_he, baseline_mif
+            - "--size"
+            - "base"    # Model size: small, base, large, giant
+            - "--fold"
+            - "21"        # Fold: 1, 2, 3, 4, 5
+            - "--epochs"
+            - "250"
+            - "--wandb-project"
+            - "vitamin-p"
+          workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
+          env:
+            - name: WANDB_API_KEY
+              value: "979fc21fe6b28c4e4a4503f7e421bfc270a4300c"
+            - name: WANDB_PROJECT
+              value: "vitamin-p"
+            - name: WANDB_MODE
+              value: "online"
+            - name: HOME
+              value: /tmp
+            - name: PYTHONPATH
+              value: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
+          volumeMounts:
+            - name: shm
+              mountPath: "/dev/shm"
+            - name: program
+              mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              cpu: "60"
+              memory: "700Gi"
+      restartPolicy: Never

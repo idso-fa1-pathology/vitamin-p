@@ -207,10 +207,53 @@ class ResultExporter:
             json.dump(geojson, f, indent=2)
         
         return geojson
-    
+
+    # Add this method to ResultExporter class
     @staticmethod
-    def export_segmentation_geojson(inst_info_dict, output_path, metadata=None):
-        """Export segmentation as GeoJSON (polygons)
+    def _simplify_contour(contour, epsilon=1.0, coord_precision=1):
+        """Simplify contour and round coordinates
+        
+        Args:
+            contour: numpy array of contour points
+            epsilon: Douglas-Peucker epsilon (higher = more aggressive simplification)
+            coord_precision: Number of decimal places for coordinates
+        
+        Returns:
+            Simplified contour with rounded coordinates
+        """
+        if len(contour) < 3:
+            return contour
+        
+        # Ensure correct shape for cv2.approxPolyDP
+        if contour.ndim == 2:
+            contour_input = contour.reshape(-1, 1, 2).astype(np.float32)
+        else:
+            contour_input = contour.astype(np.float32)
+        
+        # Simplify using Douglas-Peucker algorithm
+        simplified = cv2.approxPolyDP(contour_input, epsilon, closed=True)
+        
+        # Reshape back to (N, 2)
+        simplified = simplified.reshape(-1, 2)
+        
+        # Round coordinates to specified precision
+        if coord_precision is not None:
+            simplified = np.round(simplified, coord_precision)
+        
+        return simplified
+
+    # Modify export_segmentation_geojson to add simplification parameters
+    @staticmethod
+    def export_segmentation_geojson(inst_info_dict, output_path, metadata=None, 
+                                    simplify_epsilon=None, coord_precision=None):
+        """Export segmentation as GeoJSON (polygons) with optional simplification
+        
+        Args:
+            inst_info_dict: Instance info dictionary
+            output_path: Output file path
+            metadata: Optional metadata dict
+            simplify_epsilon: Douglas-Peucker epsilon (e.g., 1.0 = aggressive, None = no simplification)
+            coord_precision: Number of decimal places for coordinates (e.g., 1 = 0.1px accuracy)
         
         Compatible with QGIS, QuPath, and other GIS tools
         """
@@ -223,6 +266,17 @@ class ResultExporter:
             # Skip invalid polygons
             if len(contour) < 3:
                 continue
+            
+            # Apply simplification if requested
+            if simplify_epsilon is not None:
+                contour = ResultExporter._simplify_contour(
+                    contour, 
+                    epsilon=simplify_epsilon, 
+                    coord_precision=coord_precision
+                )
+            elif coord_precision is not None:
+                # Only round, no simplification
+                contour = np.round(contour, coord_precision)
             
             # Create polygon geometry
             coords = [[float(pt[0]), float(pt[1])] for pt in contour]
@@ -269,9 +323,84 @@ class ResultExporter:
             json.dump(geojson, f, indent=2)
         
         return geojson
-    
+
+    # Add new method for Parquet export
     @staticmethod
-    def export_all_formats(inst_info_dict, save_dir, image_path, object_type='unknown'):
+    def export_parquet(inst_info_dict, output_path, metadata=None):
+        """Export segmentation as Parquet (efficient binary format)
+        
+        Args:
+            inst_info_dict: Instance info dictionary
+            output_path: Output file path (.parquet)
+            metadata: Optional metadata dict
+        
+        Requires: geopandas, pyarrow
+        """
+        try:
+            import geopandas as gpd
+            import pandas as pd
+            from shapely.geometry import Polygon
+        except ImportError:
+            raise ImportError(
+                "Parquet export requires geopandas and pyarrow. "
+                "Install with: pip install geopandas pyarrow"
+            )
+        
+        rows = []
+        
+        for inst_id, inst_data in inst_info_dict.items():
+            contour = inst_data['contour']
+            centroid = inst_data['centroid']
+            
+            # Skip invalid polygons
+            if len(contour) < 3:
+                continue
+            
+            # Create polygon
+            coords = [[float(pt[0]), float(pt[1])] for pt in contour]
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
+            
+            try:
+                polygon = Polygon(coords)
+                
+                if not polygon.is_valid:
+                    polygon = polygon.buffer(0)
+                
+                row = {
+                    'id': int(inst_id),
+                    'centroid_x': float(centroid[0]),
+                    'centroid_y': float(centroid[1]),
+                    'area': float(polygon.area),
+                    'perimeter': float(polygon.length),
+                    'classification': inst_data.get('type', 'unknown'),
+                    'geometry': polygon  # GeoPandas will handle this
+                }
+                
+                rows.append(row)
+                
+            except Exception as e:
+                print(f"⚠️  Skipping invalid polygon (id={inst_id}): {e}")
+                continue
+        
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame(rows, geometry='geometry')
+        
+        # Add metadata as attributes (Parquet supports custom metadata)
+        if metadata:
+            for key, value in metadata.items():
+                gdf.attrs[key] = str(value)
+        
+        # Export to Parquet
+        gdf.to_parquet(output_path, compression='snappy')
+        
+        print(f"✓ Exported {len(gdf)} instances to Parquet")
+        
+        return gdf
+
+    @staticmethod
+    def export_all_formats(inst_info_dict, save_dir, image_path, object_type='unknown',
+                        simplify_epsilon=None, coord_precision=1, save_parquet=False):
         """Export all formats at once for a single object type
         
         Args:
@@ -279,6 +408,9 @@ class ResultExporter:
             save_dir: Output directory
             image_path: Source image path
             object_type: 'nuclei' or 'cell'
+            simplify_epsilon: Douglas-Peucker epsilon for GeoJSON simplification (e.g., 1.0)
+            coord_precision: Decimal places for coordinates (default: 1 = 0.1px accuracy)
+            save_parquet: If True, also export as Parquet format
         """
         save_dir = Path(save_dir)
         save_dir.mkdir(exist_ok=True, parents=True)
@@ -308,8 +440,23 @@ class ResultExporter:
             save_dir / f'{object_type}_detections.geojson',
             metadata
         )
+        
+        # Export simplified GeoJSON
         ResultExporter.export_segmentation_geojson(
             inst_info_dict,
             save_dir / f'{object_type}_segmentation.geojson',
-            metadata
+            metadata,
+            simplify_epsilon=simplify_epsilon,
+            coord_precision=coord_precision
         )
+        
+        # Optional: Export Parquet
+        if save_parquet:
+            try:
+                ResultExporter.export_parquet(
+                    inst_info_dict,
+                    save_dir / f'{object_type}_segmentation.parquet',
+                    metadata
+                )
+            except ImportError as e:
+                print(f"⚠️  Skipping Parquet export: {e}")

@@ -382,6 +382,10 @@ class TileProcessor:
         tissue_pct = np.sum(binary > 0) / binary.size
         
         return tissue_pct
+
+    # =========================================================================
+    # MODIFIED: process_tile_instances — now supports constrained watershed
+    # =========================================================================
     def process_tile_instances(
         self, 
         tile_pred, 
@@ -392,96 +396,145 @@ class TileProcessor:
         min_area_um=None,
         use_gpu=True,
         scale_factor=1.0,
-        grid_position=None,  # ← NEW: (tile_row, tile_col, n_tiles_h, n_tiles_w)
+        grid_position=None,          # (tile_row, tile_col, n_tiles_h, n_tiles_w)
+        # ── NEW: constrained watershed inputs ──────────────────────────────
+        nuclei_inst_map=None,        # inst_map from the nuclei branch (same tile)
+        cell_threshold=0.5,          # threshold for binarising the cell seg map
+        # ────────────────────────────────────────────────────────────────────
     ):
         """Process a single tile to extract instances (CellViT style)
         
+        When nuclei_inst_map is provided AND tile_pred contains a cell seg map,
+        the method switches to nuclei-constrained watershed instead of the
+        standard HoVer-Net instance extraction.  The output format is identical
+        either way, so nothing downstream changes.
+
         Args:
-            tile_pred: Dict with 'seg' and 'hv' predictions for this tile
+            tile_pred: Dict with 'seg' and 'hv' predictions for this tile.
+                       For the constrained path, 'seg' is the raw cell probability map.
             position: (y1, x1, y2, x2) global position of this tile
             magnification: Magnification level (20 or 40)
             mpp: Microns per pixel
-            detection_threshold: Binary threshold
+            detection_threshold: Binary threshold (used only in the standard HoVer-Net path)
             min_area_um: Minimum area in μm²
-            use_gpu: Use GPU for post-processing
+            use_gpu: Use GPU for post-processing (standard path only)
             scale_factor: Scale factor applied to tile before inference
-            grid_position: Tuple of (tile_row, tile_col, n_tiles_h, n_tiles_w) for boundary detection
+            grid_position: Tuple of (tile_row, tile_col, n_tiles_h, n_tiles_w)
+            nuclei_inst_map: (H, W) instance-labeled nuclei map from the nuclei branch.
+                             Pass this to activate constrained watershed for cell branches.
+            cell_threshold: Probability threshold for the cell seg map when using
+                            constrained watershed (default 0.5).
             
         Returns:
             List of cell dictionaries with GLOBAL coordinates
         """
         from vitaminp.postprocessing.hv_postprocess import process_model_outputs
-        
+
         y1, x1, y2, x2 = position
-        
-        # Extract instances from THIS TILE ONLY
-        inst_map, inst_info, num_instances = process_model_outputs(
-            seg_pred=tile_pred['seg'],
-            h_map=tile_pred['hv'][0],
-            v_map=tile_pred['hv'][1],
-            magnification=magnification,
-            mpp=mpp,
-            binary_threshold=detection_threshold,
-            min_area_um=min_area_um,
-            use_gpu=use_gpu
-        )
-        
-        # Convert local coordinates to global coordinates
+
+        # ─────────────────────────────────────────────────────────────────────
+        # BRANCH A: Nuclei-constrained watershed (cell branches only)
+        # Activated when caller passes nuclei_inst_map from the nuclei branch.
+        # ─────────────────────────────────────────────────────────────────────
+        if nuclei_inst_map is not None:
+            from vitaminp.inference.constrained_watershed import (
+                apply_nuclei_constrained_watershed,
+                extract_instances_from_labels,
+            )
+
+            # tile_pred['seg'] is the raw cell probability map (H, W) in [0, 1]
+            cell_seg_map = tile_pred['seg']
+
+            # Run constrained watershed: nuclei seeds → cell boundaries
+            constrained_labels = apply_nuclei_constrained_watershed(
+                nuclei_labels=nuclei_inst_map,
+                cell_seg_map=cell_seg_map,
+                cell_threshold=cell_threshold,
+            )
+
+            # Convert min_area_um → pixels (same logic as standard path)
+            min_area_px = 0
+            if min_area_um is not None and mpp > 0:
+                min_area_px = int(min_area_um / (mpp ** 2))
+
+            # Extract per-instance info in the same dict format as process_model_outputs
+            inst_info = extract_instances_from_labels(
+                label_map=constrained_labels,
+                min_area=min_area_px,
+            )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # BRANCH B: Standard HoVer-Net watershed (original path, unchanged)
+        # ─────────────────────────────────────────────────────────────────────
+        else:
+            _inst_map, inst_info, _num = process_model_outputs(
+                seg_pred=tile_pred['seg'],
+                h_map=tile_pred['hv'][0],
+                v_map=tile_pred['hv'][1],
+                magnification=magnification,
+                mpp=mpp,
+                binary_threshold=detection_threshold,
+                min_area_um=min_area_um,
+                use_gpu=use_gpu,
+            )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # SHARED: coordinate conversion + boundary detection
+        # Identical for both paths — the inst_info dict has the same keys.
+        # ─────────────────────────────────────────────────────────────────────
         cells_global = []
         for inst_id, cell_data in inst_info.items():
-            # Downscale coordinates if needed
+            # Downscale coordinates back to original WSI space if needed
             if scale_factor != 1.0:
-                bbox_local = cell_data['bbox'] / scale_factor
-                centroid_local = cell_data['centroid'] / scale_factor
-                contour_local = cell_data['contour'] / scale_factor
+                bbox_local     = np.array(cell_data['bbox'])     / scale_factor
+                centroid_local = np.array(cell_data['centroid']) / scale_factor
+                contour_local  = np.array(cell_data['contour'])  / scale_factor
             else:
-                bbox_local = cell_data['bbox']
-                centroid_local = cell_data['centroid']
-                contour_local = cell_data['contour']
-            
-            # ========== NEW: DIRECTIONAL BOUNDARY DETECTION ==========
-            # Check which boundaries this cell touches (2px margin for safety)
+                bbox_local     = np.array(cell_data['bbox'])
+                centroid_local = np.array(cell_data['centroid'])
+                contour_local  = np.array(cell_data['contour'])
+
+            # ── Directional boundary detection ──────────────────────────────
             lx_min = np.min(contour_local[:, 0])
             lx_max = np.max(contour_local[:, 0])
             ly_min = np.min(contour_local[:, 1])
             ly_max = np.max(contour_local[:, 1])
-            
-            touches_top = (ly_min <= 2)
+
+            touches_top    = (ly_min <= 2)
             touches_bottom = (ly_max >= self.tile_size - 3)
-            touches_left = (lx_min <= 2)
-            touches_right = (lx_max >= self.tile_size - 3)
-            
-            # Store grid position if provided
+            touches_left   = (lx_min <= 2)
+            touches_right  = (lx_max >= self.tile_size - 3)
+
             grid_info = None
             if grid_position is not None:
                 tile_row, tile_col, n_tiles_h, n_tiles_w = grid_position
                 grid_info = {
-                    'tile_row': tile_row,
-                    'tile_col': tile_col,
-                    'n_tiles_h': n_tiles_h,
-                    'n_tiles_w': n_tiles_w,
+                    'tile_row':   tile_row,
+                    'tile_col':   tile_col,
+                    'n_tiles_h':  n_tiles_h,
+                    'n_tiles_w':  n_tiles_w,
                 }
-            # =========================================================
-            
-            # Adjust from tile-local to WSI-global
+            # ─────────────────────────────────────────────────────────────────
+
+            # Shift from tile-local → WSI-global
             cell_global = {
-                'bbox': (bbox_local + np.array([[y1, x1], [y1, x1]])).astype(np.float32).tolist(),
-                'centroid': (centroid_local + np.array([x1, y1])).astype(np.float32).tolist(),
-                'contour': (contour_local + np.array([x1, y1])).astype(np.int32).tolist(),
+                'bbox':      (bbox_local + np.array([[y1, x1], [y1, x1]])).astype(np.float32).tolist(),
+                'centroid':  (centroid_local + np.array([x1, y1])).astype(np.float32).tolist(),
+                'contour':   (contour_local  + np.array([x1, y1])).astype(np.int32).tolist(),
                 'type_prob': cell_data.get('type_prob'),
-                'type': cell_data.get('type'),
+                'type':      cell_data.get('type'),
                 'area_pixels': cell_data.get('area_pixels'),
-                'area_um': cell_data.get('area_um'),
+                'area_um':     cell_data.get('area_um'),
                 'patch_coordinates': position,
-                # NEW: Directional boundary flags
-                'touches_top': touches_top,
+                # Directional boundary flags
+                'touches_top':    touches_top,
                 'touches_bottom': touches_bottom,
-                'touches_left': touches_left,
-                'touches_right': touches_right,
-                'grid_info': grid_info,
+                'touches_left':   touches_left,
+                'touches_right':  touches_right,
+                'grid_info':      grid_info,
             }
             cells_global.append(cell_global)
-        
+
         return cells_global
 
 

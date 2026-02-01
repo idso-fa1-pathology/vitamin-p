@@ -13,7 +13,7 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from vitaminp import VitaminPFlex, VitaminPDual
-from vitaminp.inference import WSIPredictor, ChannelConfig  # 🔥 ADD ChannelConfig
+from vitaminp.inference import WSIPredictor, ChannelConfig
 from vitaminp.inference.utils import setup_logger
 
 
@@ -104,7 +104,7 @@ def parse_args():
     inference_group.add_argument(
         '--patch_size',
         type=int,
-        default=512,  # 🔥 CHANGED: 1024 → 512 (matches notebook)
+        default=512,
         help='Size of image patches/tiles'
     )
     inference_group.add_argument(
@@ -164,7 +164,7 @@ def parse_args():
         help='WSI properties as JSON string: {"slide_mpp": 0.25, "magnification": 20}'
     )
     
-    # 🔥 NEW: MIF channel configuration
+    # MIF channel configuration
     mif_group = parser.add_argument_group('MIF channel configuration')
     mif_group.add_argument(
         '--mif_nuclear_channel',
@@ -189,9 +189,9 @@ def parse_args():
     # Post-processing parameters
     postproc_group = parser.add_argument_group('post-processing')
     postproc_group.add_argument(
-        '--clean_overlaps',  # 🔥 CHANGED: from --no_overlap_cleaning to --clean_overlaps
+        '--clean_overlaps',
         action='store_true',
-        default=True,  # 🔥 CHANGED: Default True (matches notebook)
+        default=True,
         help='Enable overlap cleaning'
     )
     postproc_group.add_argument(
@@ -201,30 +201,48 @@ def parse_args():
         help='IoU threshold for overlap cleaning'
     )
     postproc_group.add_argument(
-        '--detection_threshold',  # 🔥 NEW
+        '--detection_threshold',
         type=float,
         default=0.5,
         help='Binary threshold for instance extraction (0.5-0.8)'
     )
     postproc_group.add_argument(
-        '--min_area_um',  # 🔥 NEW
+        '--min_area_um',
         type=float,
         default=5.0,
         help='Minimum cell area in μm² (filters small artifacts)'
+    )
+    postproc_group.add_argument(
+        '--simplify_epsilon',
+        type=float,
+        default=1.0,
+        help='Contour simplification factor (higher = fewer points). Use 2.0-3.0 for large files, None to disable'
+    )
+    postproc_group.add_argument(
+        '--coord_precision',
+        type=int,
+        default=1,
+        help='Decimal places for coordinates (0 = integer, 1 = 0.1px precision, 2 = 0.01px)'
     )
     
     # Output parameters
     output_group = parser.add_argument_group('output options')
     output_group.add_argument(
-        '--save_geojson',  # 🔥 NEW
+        '--save_geojson',
         action='store_true',
-        default=True,  # 🔥 Default True (matches notebook)
+        default=True,
         help='Save detections as GeoJSON'
     )
     output_group.add_argument(
-        '--save_visualization',  # 🔥 NEW
+        '--save_parquet',
         action='store_true',
-        default=True,  # 🔥 Default True
+        default=False,
+        help='Save detections as Parquet (efficient binary format, requires geopandas)'
+    )
+    output_group.add_argument(
+        '--save_visualization',
+        action='store_true',
+        default=True,
         help='Save visualization with contours'
     )
     output_group.add_argument(
@@ -346,7 +364,7 @@ def main():
             logger.error(f"Invalid WSI properties JSON: {e}")
             sys.exit(1)
     
-    # 🔥 NEW: Create MIF channel config if specified
+    # Create MIF channel config if specified
     mif_channel_config = None
     if args.mif_nuclear_channel is not None:
         membrane_channels = None
@@ -400,7 +418,7 @@ def main():
             magnification=args.magnification,
             mixed_precision=args.mixed_precision,
             logger=logger,
-            mif_channel_config=mif_channel_config,  # 🔥 NEW
+            mif_channel_config=mif_channel_config,
             tissue_dilation=1,
         )
     except Exception as e:
@@ -418,15 +436,18 @@ def main():
                 wsi_properties=wsi_properties,
                 filter_tissue=args.filter_tissue,
                 tissue_threshold=args.tissue_threshold,
-                clean_overlaps=args.clean_overlaps,  # 🔥 CHANGED
+                clean_overlaps=args.clean_overlaps,
                 iou_threshold=args.iou_threshold,
                 save_heatmap=args.save_heatmap,
                 save_json=True,
-                save_geojson=args.save_geojson,  # 🔥 NEW
-                save_visualization=args.save_visualization,  # 🔥 NEW
+                save_geojson=args.save_geojson,
+                save_visualization=args.save_visualization,
                 save_csv=args.save_csv,
-                detection_threshold=args.detection_threshold,  # 🔥 NEW
-                min_area_um=args.min_area_um,  # 🔥 NEW
+                detection_threshold=args.detection_threshold,
+                min_area_um=args.min_area_um,
+                simplify_epsilon=args.simplify_epsilon,
+                coord_precision=args.coord_precision,
+                save_parquet=args.save_parquet,
             )
             
             logger.info("\n" + "="*60)
@@ -458,15 +479,18 @@ def main():
                         wsi_properties=wsi_properties,
                         filter_tissue=args.filter_tissue,
                         tissue_threshold=args.tissue_threshold,
-                        clean_overlaps=args.clean_overlaps,  # 🔥 CHANGED
+                        clean_overlaps=args.clean_overlaps,
                         iou_threshold=args.iou_threshold,
                         save_heatmap=args.save_heatmap,
                         save_json=True,
-                        save_geojson=args.save_geojson,  # 🔥 NEW
-                        save_visualization=args.save_visualization,  # 🔥 NEW
+                        save_geojson=args.save_geojson,
+                        save_visualization=args.save_visualization,
                         save_csv=args.save_csv,
-                        detection_threshold=args.detection_threshold,  # 🔥 NEW
-                        min_area_um=args.min_area_um,  # 🔥 NEW
+                        detection_threshold=args.detection_threshold,
+                        min_area_um=args.min_area_um,
+                        simplify_epsilon=args.simplify_epsilon,
+                        coord_precision=args.coord_precision,
+                        save_parquet=args.save_parquet,
                     )
                     all_results[wsi_name] = result
                     

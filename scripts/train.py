@@ -67,7 +67,7 @@ def main():
                        help='W&B run name (auto-generated if not provided)')
     
     # Paths
-    parser.add_argument('--config-dir', type=str, default='configs',
+    parser.add_argument('--config-dir', type=str, default='configs/training',
                        help='Config directory')
     
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',

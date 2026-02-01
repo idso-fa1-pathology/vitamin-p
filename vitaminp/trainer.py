@@ -166,9 +166,9 @@ class VitaminPTrainer:
             
             # ❌ ISSUE: Only loading H&E ground truth
             # ✅ FIX: Load BOTH H&E and MIF ground truth
-            he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
             he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
             he_cell_hv = batch['he_cell_hv'].to(self.device)
             
             mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -297,9 +297,9 @@ class VitaminPTrainer:
             # cell_hv = batch['he_cell_hv'].to(self.device)
             
             # ✅ FIX: Load BOTH H&E and MIF ground truth
-            he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
             he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
             he_cell_hv = batch['he_cell_hv'].to(self.device)
             
             mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -334,9 +334,9 @@ class VitaminPTrainer:
                     modality_labels.append('he')
                     he_count += 1
                     # ✅ FIX: Use H&E ground truth for H&E samples
-                    nuclei_masks.append(he_nuclei_mask[i])
+                    nuclei_masks.append(mif_nuclei_mask[i])
                     cell_masks.append(he_cell_mask[i])
-                    nuclei_hvs.append(he_nuclei_hv[i])
+                    nuclei_hvs.append(mif_nuclei_hv[i])
                     cell_hvs.append(he_cell_hv[i])
                 
                 img = self.preprocessor.percentile_normalize(img)
@@ -529,9 +529,9 @@ class VitaminPTrainer:
             he_img = batch['he_image'].to(self.device)
             
             # Load H&E ground truth only
-            he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
             he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
             he_cell_hv = batch['he_cell_hv'].to(self.device)
             
             # Apply preprocessing
@@ -711,9 +711,9 @@ class VitaminPTrainer:
                 mif_img = batch['mif_image'].to(self.device)
                 
                 # ✅ FIX: Load BOTH H&E and MIF ground truth
-                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -766,9 +766,9 @@ class VitaminPTrainer:
             
             for batch in self.val_loader:
                 # ✅ FIX: Load BOTH H&E and MIF ground truth
-                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -827,9 +827,9 @@ class VitaminPTrainer:
             
             for batch in self.val_loader:
                 he_img = batch['he_image'].to(self.device)
-                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 he_img = self.preprocessor.percentile_normalize(he_img)

@@ -223,7 +223,7 @@ filtering:
 # MEMORY & CACHING
 # ============================================================================
 memory:
-  use_cache: false
+  use_cache: true
   force_regenerate_cache: false
   strategy: "memory"
   max_memory_gb: 32.0

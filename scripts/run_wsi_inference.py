@@ -79,11 +79,13 @@ def parse_args():
         help='Whether backbone was frozen during training'
     )
     model_group.add_argument(
-        '--branch',
+        '--branches',
         type=str,
-        default='he_nuclei',
+        nargs='+',
+        default=['he_nuclei'],
         choices=['he_nuclei', 'he_cell', 'mif_nuclei', 'mif_cell'],
-        help='Which model branch to use for inference'
+        help='Branch(es) to run. Pass multiple to activate constrained watershed, '
+             'e.g.: --branches he_nuclei he_cell'
     )
     
     # Inference parameters
@@ -216,13 +218,33 @@ def parse_args():
         '--simplify_epsilon',
         type=float,
         default=1.0,
-        help='Contour simplification factor (higher = fewer points). Use 2.0-3.0 for large files, None to disable'
+        help='Contour simplification factor (higher = fewer points). Use 2.0-3.0 for large files'
     )
     postproc_group.add_argument(
         '--coord_precision',
         type=int,
         default=1,
         help='Decimal places for coordinates (0 = integer, 1 = 0.1px precision, 2 = 0.01px)'
+    )
+    postproc_group.add_argument(
+        '--use_constrained_watershed',
+        action='store_true',
+        default=True,
+        help='Use nuclei-constrained watershed for cell branches. '
+             'Requires matching nuclei branch in --branches (e.g. he_nuclei + he_cell). '
+             'Falls back to standard HoVer-Net if nuclei branch is missing.'
+    )
+    postproc_group.add_argument(
+        '--no_constrained_watershed',
+        action='store_true',
+        default=False,
+        help='Disable constrained watershed (use standard HoVer-Net for cell branches)'
+    )
+    postproc_group.add_argument(
+        '--cell_threshold',
+        type=float,
+        default=0.5,
+        help='Probability threshold for cell seg map in constrained watershed'
     )
     
     # Output parameters
@@ -340,9 +362,95 @@ def get_wsi_paths(args):
     return wsi_paths
 
 
+def resolve_constrained_watershed_flag(args):
+    """Resolve the constrained watershed flag from the two boolean args.
+    
+    --use_constrained_watershed is True by default.
+    --no_constrained_watershed explicitly disables it.
+    The --no flag takes priority if both are somehow set.
+    
+    Returns:
+        bool
+    """
+    if args.no_constrained_watershed:
+        return False
+    return args.use_constrained_watershed
+
+
+def build_predict_kwargs(args, wsi_path, output_dir, wsi_properties):
+    """Build the keyword arguments dict for predictor.predict().
+    
+    Centralises the single-vs-multi branch logic so both the single-WSI
+    and batch paths call predict() identically.
+    
+    Args:
+        args: Parsed CLI args
+        wsi_path: Path to the WSI being processed
+        output_dir: Output directory for this WSI
+        wsi_properties: Parsed WSI properties dict (or None)
+    
+    Returns:
+        dict: kwargs ready to unpack into predictor.predict()
+    """
+    kwargs = dict(
+        wsi_path=str(wsi_path),
+        output_dir=str(output_dir),
+        wsi_properties=wsi_properties,
+        filter_tissue=args.filter_tissue,
+        tissue_threshold=args.tissue_threshold,
+        clean_overlaps=args.clean_overlaps,
+        iou_threshold=args.iou_threshold,
+        save_heatmap=args.save_heatmap,
+        save_json=True,
+        save_geojson=args.save_geojson,
+        save_visualization=args.save_visualization,
+        save_csv=args.save_csv,
+        detection_threshold=args.detection_threshold,
+        min_area_um=args.min_area_um,
+        simplify_epsilon=args.simplify_epsilon,
+        coord_precision=args.coord_precision,
+        save_parquet=args.save_parquet,
+    )
+
+    # Single branch → use `branch` (str), multi → use `branches` (list)
+    if len(args.branches) == 1:
+        kwargs['branch'] = args.branches[0]
+    else:
+        kwargs['branches'] = args.branches
+
+    return kwargs
+
+
+def log_results(logger, results, branches):
+    """Log prediction results, handling both single and multi-branch return shapes.
+    
+    Args:
+        logger: Logger instance
+        results: Return value from predictor.predict()
+        branches: The branches list that was passed to predict
+    """
+    if len(branches) == 1:
+        # Flat dict
+        logger.info(f"  Branch: {results['branch']}")
+        logger.info(f"  Detections: {results['num_detections']}")
+        if 'processing_time' in results:
+            logger.info(f"  Processing time: {results['processing_time']:.2f}s")
+    else:
+        # Nested dict keyed by branch name
+        total = 0
+        for branch_name, branch_results in results.items():
+            n = branch_results['num_detections']
+            total += n
+            logger.info(f"  {branch_name}: {n} detections")
+        logger.info(f"  Total detections: {total}")
+
+
 def main():
     """Main function."""
     args = parse_args()
+    
+    # Resolve constrained watershed flag
+    use_constrained_watershed = resolve_constrained_watershed_flag(args)
     
     # Setup logger
     logger = setup_logger(
@@ -350,9 +458,13 @@ def main():
         log_file=Path(args.output_dir) / "inference.log"
     )
     
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("VitaminP WSI Inference")
-    logger.info("="*60)
+    logger.info("=" * 60)
+    logger.info(f"Branches: {args.branches}")
+    logger.info(f"Constrained watershed: {use_constrained_watershed}")
+    if use_constrained_watershed and len(args.branches) > 1:
+        logger.info(f"Cell threshold: {args.cell_threshold}")
     
     # Parse optional JSON arguments
     wsi_properties = None
@@ -420,6 +532,8 @@ def main():
             logger=logger,
             mif_channel_config=mif_channel_config,
             tissue_dilation=1,
+            use_constrained_watershed=use_constrained_watershed,
+            cell_threshold=args.cell_threshold,
         )
     except Exception as e:
         logger.error(f"Failed to create predictor: {e}")
@@ -429,33 +543,13 @@ def main():
     try:
         if len(wsi_paths) == 1:
             # Single WSI
-            results = predictor.predict(
-                wsi_path=wsi_paths[0],
-                output_dir=args.output_dir,
-                branch=args.branch,
-                wsi_properties=wsi_properties,
-                filter_tissue=args.filter_tissue,
-                tissue_threshold=args.tissue_threshold,
-                clean_overlaps=args.clean_overlaps,
-                iou_threshold=args.iou_threshold,
-                save_heatmap=args.save_heatmap,
-                save_json=True,
-                save_geojson=args.save_geojson,
-                save_visualization=args.save_visualization,
-                save_csv=args.save_csv,
-                detection_threshold=args.detection_threshold,
-                min_area_um=args.min_area_um,
-                simplify_epsilon=args.simplify_epsilon,
-                coord_precision=args.coord_precision,
-                save_parquet=args.save_parquet,
-            )
+            predict_kwargs = build_predict_kwargs(args, wsi_paths[0], args.output_dir, wsi_properties)
+            results = predictor.predict(**predict_kwargs)
             
-            logger.info("\n" + "="*60)
+            logger.info("\n" + "=" * 60)
             logger.info("INFERENCE COMPLETE")
-            logger.info("="*60)
-            logger.info(f"Branch: {results['branch']}")
-            logger.info(f"Total detections: {results['num_detections']}")
-            logger.info(f"Processing time: {results['processing_time']:.2f}s")
+            logger.info("=" * 60)
+            log_results(logger, results, args.branches)
             logger.info(f"Results saved to: {args.output_dir}")
             
         else:
@@ -464,63 +558,56 @@ def main():
             
             for wsi_path in wsi_paths:
                 wsi_name = wsi_path.stem
-                logger.info(f"\n{'='*60}")
+                logger.info(f"\n{'=' * 60}")
                 logger.info(f"Processing: {wsi_name}")
-                logger.info(f"{'='*60}")
+                logger.info(f"{'=' * 60}")
                 
                 try:
-                    # Create output dir for this WSI
                     wsi_output_dir = Path(args.output_dir) / wsi_name
-                    
-                    result = predictor.predict(
-                        wsi_path=wsi_path,
-                        output_dir=str(wsi_output_dir),
-                        branch=args.branch,
-                        wsi_properties=wsi_properties,
-                        filter_tissue=args.filter_tissue,
-                        tissue_threshold=args.tissue_threshold,
-                        clean_overlaps=args.clean_overlaps,
-                        iou_threshold=args.iou_threshold,
-                        save_heatmap=args.save_heatmap,
-                        save_json=True,
-                        save_geojson=args.save_geojson,
-                        save_visualization=args.save_visualization,
-                        save_csv=args.save_csv,
-                        detection_threshold=args.detection_threshold,
-                        min_area_um=args.min_area_um,
-                        simplify_epsilon=args.simplify_epsilon,
-                        coord_precision=args.coord_precision,
-                        save_parquet=args.save_parquet,
-                    )
+                    predict_kwargs = build_predict_kwargs(args, wsi_path, wsi_output_dir, wsi_properties)
+                    result = predictor.predict(**predict_kwargs)
                     all_results[wsi_name] = result
+                    
+                    logger.info(f"✓ {wsi_name}:")
+                    log_results(logger, result, args.branches)
                     
                 except Exception as e:
                     logger.error(f"Failed to process {wsi_name}: {e}", exc_info=True)
                     all_results[wsi_name] = {'error': str(e)}
             
-            # Summary
-            logger.info("\n" + "="*60)
+            # Batch summary
+            logger.info("\n" + "=" * 60)
             logger.info("BATCH INFERENCE COMPLETE")
-            logger.info("="*60)
+            logger.info("=" * 60)
             
             total_detections = 0
-            total_time = 0
+            total_time = 0.0
             successful = 0
             
             for wsi_name, result in all_results.items():
-                if 'error' not in result:
-                    successful += 1
-                    total_detections += result['num_detections']
-                    total_time += result['processing_time']
-                    logger.info(f"✓ {wsi_name}: {result['num_detections']} detections ({result['branch']})")
-                else:
+                if 'error' in result:
                     logger.error(f"✗ {wsi_name}: {result['error']}")
+                    continue
+                
+                successful += 1
+                
+                # Accumulate totals — handle single vs multi branch
+                if len(args.branches) == 1:
+                    total_detections += result['num_detections']
+                    total_time += result.get('processing_time', 0.0)
+                else:
+                    for branch_name, branch_results in result.items():
+                        total_detections += branch_results['num_detections']
+                    # processing_time not returned per-branch in multi mode;
+                    # use 0.0 as safe default
             
-            logger.info(f"\nProcessed {successful}/{len(wsi_paths)} WSIs successfully")
-            logger.info(f"Branch: {args.branch}")
+            logger.info(f"Processed {successful}/{len(wsi_paths)} WSIs successfully")
+            logger.info(f"Branches: {args.branches}")
             logger.info(f"Total detections: {total_detections}")
-            logger.info(f"Total time: {total_time:.2f}s")
-            logger.info(f"Results saved to: {args.output_dir}")     
+            if total_time > 0:
+                logger.info(f"Total time: {total_time:.2f}s")
+            logger.info(f"Results saved to: {args.output_dir}")
+        
         return 0
         
     except Exception as e:

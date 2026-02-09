@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-flex-base-fold21  # Updated name to reflect syn model
+  name: vitamin-p-flex-large-fold32-hv4  # Updated name to reflect syn model
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -32,11 +32,12 @@ spec:
             - "--model"
             - "flex"      # Model type: dual, syn, flex, baseline_he, baseline_mif
             - "--size"
-            - "base"    # Model size: small, base, large, giant
+            - "large"    # Model size: small, base, large, giant
             - "--fold"
-            - "21"        # Fold: 1, 2, 3, 4, 5
+            - "32"        # Fold: 1, 2, 3, 4, 5
             - "--epochs"
             - "250"
+            # - "--freeze-backbone"     # ← ADD THIS LINE
             - "--wandb-project"
             - "vitamin-p"
           workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
@@ -58,7 +59,7 @@ spec:
               mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
           resources:
             limits:
-              nvidia.com/gpu: "2"
+              nvidia.com/gpu: "1"
               cpu: "60"
               memory: "700Gi"
       restartPolicy: Never

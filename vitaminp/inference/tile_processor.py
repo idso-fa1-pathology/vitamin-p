@@ -54,7 +54,7 @@ class TileProcessor:
         # Original WSI dimensions
         h_original = wsi_reader.height
         w_original = wsi_reader.width
-        
+
         # Virtual upscaled dimensions
         h_upscaled = int(h_original * scale_factor)
         w_upscaled = int(w_original * scale_factor)
@@ -329,60 +329,70 @@ class TileProcessor:
         return tiles, positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
 
     def _calculate_tissue_percentage(self, tile):
-        """Calculate percentage of tissue in a tile using Otsu thresholding
-        
-        Args:
-            tile: RGB tile image (H, W, 3) or MIF image (H, W, 2)
+            """Robust Tissue Detection (Modality-Aware).
             
-        Returns:
-            float: Tissue percentage (0-1)
-        """
-        import cv2
-        
-        # **NEW: Handle different number of channels**
-        if tile.ndim != 3:
-            raise ValueError(f"Expected 3D tile (H, W, C), got shape {tile.shape}")
-        
-        n_channels = tile.shape[2]
-        
-        if n_channels == 3:
-            # RGB/H&E image - convert to grayscale
-            gray = cv2.cvtColor(tile, cv2.COLOR_RGB2GRAY)
-        elif n_channels == 2:
-            # MIF image - use first channel (nuclear) or max projection
-            # Option 1: Use nuclear channel only
-            gray = tile[:, :, 0]
+            Logic:
+            1. Detect Modality based on background brightness.
+            2. H&E (Bright BG): Blur + Threshold < 210 (No Auto-Contrast).
+            3. MIF (Dark BG): Auto-Contrast + Threshold > 40 (With Noise Floor).
+            """
+            import cv2
             
-            # Option 2: Use max projection of both channels (uncomment if preferred)
-            # gray = np.max(tile, axis=2)
+            # 1. Channel Selection
+            if tile.ndim == 3:
+                if tile.shape[2] == 3: 
+                    gray = cv2.cvtColor(tile, cv2.COLOR_RGB2GRAY)
+                else: 
+                    gray = tile[:, :, 0]
+            else:
+                gray = tile
+                
+            # 2. Modality Detection (Bright vs Dark Background)
+            # H&E background is white (~200-255). MIF background is black (~0-20).
+            mean_val = np.mean(gray)
+            is_brightfield = mean_val > 100 
             
-            # Ensure uint8 for Otsu
-            if gray.dtype == np.float32 or gray.dtype == np.float64:
-                gray = (gray * 255).astype(np.uint8)
-            elif gray.dtype == np.uint16:
-                gray = (gray / 256).astype(np.uint8)
-        elif n_channels == 1:
-            # Single channel - use directly
-            gray = tile[:, :, 0]
-        else:
-            raise ValueError(f"Unsupported number of channels: {n_channels}")
-        
-        # Ensure gray is uint8
-        if gray.dtype != np.uint8:
-            gray = gray.astype(np.uint8)
-        
-        # Otsu's thresholding
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Invert if background is white (common in histology)
-        if binary.mean() > 127:
-            binary = 255 - binary
-        
-        # Calculate tissue percentage
-        tissue_pct = np.sum(binary > 0) / binary.size
-        
-        return tissue_pct
+            if is_brightfield:
+                # === H&E / Brightfield Path ===
+                # DO NOT Auto-contrast! It turns faint white noise into black artifacts.
+                
+                # Ensure uint8
+                if gray.dtype != np.uint8: gray = gray.astype(np.uint8)
+                
+                # Blur to remove pixel noise
+                blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+                
+                # Simple Threshold: Tissue is darker than 210
+                # Background (211-255) becomes 0. Tissue (0-210) becomes 1.
+                _, binary = cv2.threshold(blurred, 210, 255, cv2.THRESH_BINARY_INV)
+                
+            else:
+                # === MIF / Fluorescence Path ===
+                # Signal is faint. We MUST Auto-contrast, but safely.
+                
+                gray_f = gray.astype(np.float32)
+                g_min, g_max = gray_f.min(), gray_f.max()
+                dynamic_range = g_max - g_min
+                
+                # Noise Floor: If range is tiny, it's just sensor noise. Don't stretch.
+                # 16-bit images often have ~50-100 noise range. 8-bit ~10.
+                noise_floor = 100 if tile.dtype == np.uint16 else 15
+                
+                if dynamic_range > noise_floor:
+                    # Stretch valid faint signal to full 0-255
+                    gray_norm = ((gray_f - g_min) / dynamic_range) * 255.0
+                    gray_uint8 = gray_norm.astype(np.uint8)
+                else:
+                    # Range too small? Treat as empty black tile.
+                    gray_uint8 = np.zeros_like(gray, dtype=np.uint8)
 
+                # Blur
+                blurred = cv2.GaussianBlur(gray_uint8, (7, 7), 0)
+                
+                # Threshold: Tissue is brighter than 40
+                _, binary = cv2.threshold(blurred, 40, 255, cv2.THRESH_BINARY)
+                
+            return np.sum(binary > 0) / binary.size
     # =========================================================================
     # MODIFIED: process_tile_instances — now supports constrained watershed
     # =========================================================================

@@ -89,286 +89,178 @@ class WSIPredictor:
     }
     
     def __init__(
-        self,
-        model,
-        checkpoint_path=None,
-        device='cuda',
-        patch_size=512,
-        overlap=64,
-        target_mpp=0.25,
-        magnification=40,
-        mixed_precision=False,
-        logger=None,
-        mif_channel_config=None,
-        tissue_dilation=1,
-        gan_checkpoint_path=None,
-        gan_use_attention=True,
-        gan_use_spectral_norm=False,
-        gan_n_residual_blocks=4,
-        use_synthetic_mif=False,
-        use_constrained_watershed=True,   # ← NEW: on by default
-        cell_threshold=0.5,               # ← NEW: threshold for cell seg map in constrained WS
-    ):
-        """Initialize WSI Predictor
-        
-        Args:
-            model: Loaded model instance (VitaminPFlex or VitaminPDual)
-            checkpoint_path: Path to checkpoint (optional, for reference)
-            device: Device for inference ('cuda' or 'cpu')
-            patch_size: Tile size (must match training)
-            overlap: Overlap between tiles in pixels
-            target_mpp: Target microns per pixel
-            magnification: Magnification level (20 or 40)
-            mixed_precision: Use FP16 for inference
-            logger: Logger instance (creates one if None)
-            mif_channel_config: MIF channel configuration
-            tissue_dilation: Number of tiles to dilate tissue regions
-            gan_checkpoint_path: Path to GAN checkpoint for synthetic MIF generation
-            gan_use_attention: GAN architecture parameter
-            gan_use_spectral_norm: GAN architecture parameter
-            gan_n_residual_blocks: GAN architecture parameter
-            use_synthetic_mif: If True, generate synthetic MIF from H&E (VitaminPDual only)
-            use_constrained_watershed: If True, use nuclei-constrained watershed for cell
-                                       branches when the matching nuclei branch is also being
-                                       processed.  Falls back to standard HoVer-Net when the
-                                       nuclei branch is not available.  (default True)
-            cell_threshold: Probability threshold applied to the cell seg map inside
-                            the constrained watershed (default 0.5).
-        """
-        self.model = model
-        self.checkpoint_path = checkpoint_path
-        self.device = device
-        self.patch_size = patch_size
-        self.overlap = overlap
-        self.target_mpp = target_mpp
-        self.magnification = magnification
-        self.mixed_precision = mixed_precision
-        self.tissue_dilation = tissue_dilation
-        self.use_synthetic_mif = use_synthetic_mif
-        self.use_constrained_watershed = use_constrained_watershed   # ← NEW
-        self.cell_threshold = cell_threshold                          # ← NEW
-        
-        model_class_name = type(model).__name__
-        
-        # 🔥 Detect model type
-        self.is_dual_model = (model_class_name == 'VitaminPDual')
-        
-        # Validate synthetic MIF usage
-        if use_synthetic_mif and not self.is_dual_model:
-            raise ValueError(
-                "use_synthetic_mif=True requires VitaminPDual model. "
-                f"Current model is {model_class_name}"
-            )
-        
-        if use_synthetic_mif and gan_checkpoint_path is None:
-            raise ValueError(
-                "use_synthetic_mif=True requires gan_checkpoint_path to be provided."
-            )
-        
-        # Setup logger
-        if logger is None:
-            self.logger = setup_logger('WSIPredictor')
-        else:
-            self.logger = logger
-        
-        # Initialize components
-        self.wsi_handler = MultiFormatImageLoader()
-        self.tile_processor = TileProcessor(
-            model=self.model,
-            device=self.device,
-            tile_size=self.patch_size,
-            overlap=self.overlap
-        )
-        self.preprocessor = SimplePreprocessing()
-        
-        # ========== GAN SETUP FOR SYNTHETIC MIF ==========
-        self.gan_generator = None
-        self.gan_preprocessor = None
-        
-        if gan_checkpoint_path is not None:
-            self.logger.info(f"🎨 Loading GAN generator from {gan_checkpoint_path}")
+            self,
+            model,
+            checkpoint_path=None,
+            device='cuda',
+            patch_size=512,
+            overlap=64,
+            target_mpp=0.25,
+            magnification=40,
+            mixed_precision=False,
+            logger=None,
+            mif_channel_config=None,  # <--- This argument comes in...
+            tissue_dilation=1,
+            gan_checkpoint_path=None,
+            gan_use_attention=True,
+            gan_use_spectral_norm=False,
+            gan_n_residual_blocks=4,
+            use_synthetic_mif=False,
+            use_constrained_watershed=True,
+            cell_threshold=0.5,
+            batch_size=8,
+        ):
+            """Initialize WSI Predictor"""
+            self.model = model
+            self.checkpoint_path = checkpoint_path
+            self.device = device
+            self.patch_size = patch_size
+            self.overlap = overlap
+            self.target_mpp = target_mpp
+            self.magnification = magnification
+            self.mixed_precision = mixed_precision
+            self.tissue_dilation = tissue_dilation
+            self.use_synthetic_mif = use_synthetic_mif
+            self.use_constrained_watershed = use_constrained_watershed
+            self.cell_threshold = cell_threshold
+            self.batch_size = batch_size
             
-            # Load checkpoint first to check for saved architecture params
-            checkpoint = torch.load(gan_checkpoint_path, map_location=device)
+            # 🔥 RESTORED MISSING LINE 🔥
+            self.mif_channel_config = mif_channel_config 
             
-            # Try to extract architecture from checkpoint, fall back to provided params
-            if 'model_config' in checkpoint:
-                config = checkpoint['model_config']
-                use_attention = config.get('use_attention', gan_use_attention)
-                use_spectral_norm = config.get('use_spectral_norm', gan_use_spectral_norm)
-                n_residual_blocks = config.get('n_residual_blocks', gan_n_residual_blocks)
-                self.logger.info(f"   ✓ Using architecture from checkpoint metadata")
+            model_class_name = type(model).__name__
+            self.is_dual_model = (model_class_name == 'VitaminPDual')
+            
+            # Validate synthetic MIF usage
+            if use_synthetic_mif and not self.is_dual_model:
+                raise ValueError(
+                    "use_synthetic_mif=True requires VitaminPDual model. "
+                    f"Current model is {model_class_name}"
+                )
+            
+            if use_synthetic_mif and gan_checkpoint_path is None:
+                raise ValueError(
+                    "use_synthetic_mif=True requires gan_checkpoint_path to be provided."
+                )
+            
+            # Setup logger
+            if logger is None:
+                self.logger = setup_logger('WSIPredictor')
             else:
-                use_attention = gan_use_attention
-                use_spectral_norm = gan_use_spectral_norm
-                n_residual_blocks = gan_n_residual_blocks
-                self.logger.info(f"   ⚠ No architecture metadata in checkpoint, using provided params")
+                self.logger = logger
             
-            # Log architecture
-            self.logger.info(f"   Architecture: attention={use_attention}, "
-                            f"spectral_norm={use_spectral_norm}, "
-                            f"residual_blocks={n_residual_blocks}")
+            # Initialize components
+            self.wsi_handler = MultiFormatImageLoader()
+            self.tile_processor = TileProcessor(
+                model=self.model,
+                device=self.device,
+                tile_size=self.patch_size,
+                overlap=self.overlap
+            )
+            self.preprocessor = SimplePreprocessing()
             
-            # Create generator with correct architecture
-            self.gan_generator = Pix2PixGenerator(
-                in_channels=3, 
-                out_channels=2,
-                use_attention=use_attention,
-                use_spectral_norm=use_spectral_norm,
-                n_residual_blocks=n_residual_blocks
-            ).to(device)
+            # ========== GAN SETUP FOR SYNTHETIC MIF ==========
+            self.gan_generator = None
+            self.gan_preprocessor = None
             
-            self.gan_generator.load_state_dict(checkpoint['generator_state_dict'])
-            self.gan_generator.eval()
-            
-            self.gan_preprocessor = GANPreprocessing()
-            self.logger.info(f"   ✓ GAN generator loaded successfully")
+            if gan_checkpoint_path is not None:
+                self.logger.info(f"🎨 Loading GAN generator from {gan_checkpoint_path}")
+                
+                checkpoint = torch.load(gan_checkpoint_path, map_location=device)
+                
+                if 'model_config' in checkpoint:
+                    config = checkpoint['model_config']
+                    use_attention = config.get('use_attention', gan_use_attention)
+                    use_spectral_norm = config.get('use_spectral_norm', gan_use_spectral_norm)
+                    n_residual_blocks = config.get('n_residual_blocks', gan_n_residual_blocks)
+                else:
+                    use_attention = gan_use_attention
+                    use_spectral_norm = gan_use_spectral_norm
+                    n_residual_blocks = gan_n_residual_blocks
+                
+                self.gan_generator = Pix2PixGenerator(
+                    in_channels=3, 
+                    out_channels=2,
+                    use_attention=use_attention,
+                    use_spectral_norm=use_spectral_norm,
+                    n_residual_blocks=n_residual_blocks
+                ).to(device)
+                
+                self.gan_generator.load_state_dict(checkpoint['generator_state_dict'])
+                self.gan_generator.eval()
+                
+                self.gan_preprocessor = GANPreprocessing()
+                self.logger.info(f"   ✓ GAN generator loaded successfully")
 
-        self.model.eval()
-        
-        # Log model type
-        if self.is_dual_model:
-            if use_synthetic_mif:
-                model_type = 'VitaminPDual (dual-modality with synthetic MIF generation)'
-            else:
+            self.model.eval()
+            
+            # Log model type
+            if self.is_dual_model:
                 model_type = 'VitaminPDual (dual-modality)'
-        else:
-            model_type = 'VitaminPFlex (single-modality)'
-        
-        self.logger.info(f"WSIPredictor initialized:")
-        self.logger.info(f"  Device: {device}")
-        self.logger.info(f"  Model type: {model_type}")
-        self.logger.info(f"  Patch size: {patch_size}")
-        self.logger.info(f"  Overlap: {overlap}")
-        self.logger.info(f"  Magnification: {magnification}")
-        if use_synthetic_mif:
-            self.logger.info(f"  Synthetic MIF: Enabled")
-        if use_constrained_watershed:
-            self.logger.info(f"  Constrained watershed: Enabled (cell_threshold={cell_threshold})")
-        self.mif_channel_config = mif_channel_config
-        if mif_channel_config is not None:
-            self.logger.info(f"  MIF channels: {mif_channel_config.get_description()}")
+                if use_synthetic_mif:
+                    model_type += ' + Synthetic MIF'
+            else:
+                model_type = 'VitaminPFlex (single-modality)'
+            
+            self.logger.info(f"WSIPredictor initialized:")
+            self.logger.info(f"  Device: {device}")
+            self.logger.info(f"  Model type: {model_type}")
+            self.logger.info(f"  Batch Size: {batch_size}")
+            if self.mif_channel_config:
+                self.logger.info(f"  MIF Config: Present")
 
     def predict(
-        self,
-        wsi_path,
-        wsi_path_mif=None,
-        output_dir='results',
-        branch='he_nuclei',
-        branches=None,
-        wsi_properties=None,
-        filter_tissue=False,
-        tissue_threshold=0.1,
-        clean_overlaps=True,
-        iou_threshold=0.5,
-        save_masks=True,
-        save_json=True,
-        save_geojson=True,
-        save_csv=False,
-        save_heatmap=False,
-        save_visualization=True,
-        detection_threshold=0.5,
-        min_area_um=3.0,
-        mpp_override=None,
-        simplify_epsilon=1.0,
-        coord_precision=1,
-        save_parquet=False,
-    ):
-        """Run inference on WSI
-        
-        Args:
-            wsi_path: Path to H&E WSI (or MIF for Flex model)
-            wsi_path_mif: Path to co-registered MIF WSI (required for dual models unless use_synthetic_mif=True)
-            output_dir: Output directory
-            branch: Single branch to process (ignored if branches is provided)
-            branches: List of branches to process (e.g., ['he_nuclei', 'he_cell'])
-            wsi_properties: WSI metadata (optional)
-            filter_tissue: Filter tiles by tissue content
-            tissue_threshold: Minimum tissue percentage (0-1)
-            clean_overlaps: Remove overlapping instances
-            iou_threshold: IoU threshold for overlap removal
-            save_masks: Save binary masks
-            save_json: Save JSON results
-            save_geojson: Save GeoJSON results
-            save_csv: Save CSV results
-            save_heatmap: Save heatmap visualization
-            save_visualization: Save visualization with contours
-            detection_threshold: Binary threshold for instance extraction (0.5-0.8)
-            min_area_um: Minimum cell area in μm² (default 3.0 for nuclei, None to disable)
-            mpp_override: Override auto-detected MPP (for files with bad/missing metadata)
-        
-        Returns:
-            dict: Results with predictions, instances, timing
-        """
-        start_time = time.time()
-        
-        # Validate dual model usage
-        if self.is_dual_model and wsi_path_mif is None and not self.use_synthetic_mif:
-            raise ValueError(
-                "This is a dual model (VitaminPDual) which requires both H&E and MIF inputs. "
-                "Please provide wsi_path_mif parameter OR set use_synthetic_mif=True when initializing WSIPredictor."
-            )
-        
-        if not self.is_dual_model and wsi_path_mif is not None:
-            self.logger.warning(
-                "wsi_path_mif provided but model is single-modality (VitaminPFlex). "
-                "MIF image will be ignored."
-            )
-            wsi_path_mif = None
-        
-        # Determine branches to process
-        if branches is not None:
-            branch_list = branches if isinstance(branches, list) else [branches]
-        else:
-            branch_list = [branch]
-        
-        # Validate branches
-        for b in branch_list:
-            if b not in self.SUPPORTED_BRANCHES:
-                raise ValueError(f"Unsupported branch: {b}. Choose from {list(self.SUPPORTED_BRANCHES.keys())}")
-        
-        # ─── NEW: warn if constrained WS is on but nuclei branch is missing ───
-        if self.use_constrained_watershed:
+            self,
+            wsi_path,
+            wsi_path_mif=None,
+            output_dir='results',
+            branch='he_nuclei',
+            branches=None,
+            wsi_properties=None,
+            filter_tissue=False,
+            tissue_threshold=0.1,
+            clean_overlaps=True,
+            iou_threshold=0.5,
+            save_masks=True,
+            save_json=True,
+            save_geojson=True,
+            save_csv=False,
+            save_heatmap=False,
+            save_visualization=True,
+            detection_threshold=0.5,
+            min_area_um=3.0,
+            mpp_override=None,
+            simplify_epsilon=1.0,
+            coord_precision=1,
+            save_parquet=False,
+        ):
+            """Run inference on WSI (Optimized Wrapper)"""
+            
+            if self.is_dual_model and wsi_path_mif is None and not self.use_synthetic_mif:
+                raise ValueError("Dual model requires MIF path or synthetic MIF.")
+            
+            if not self.is_dual_model and wsi_path_mif is not None:
+                self.logger.warning("Ignoring MIF path for single-modality model.")
+                wsi_path_mif = None
+            
+            if branches is not None:
+                branch_list = branches if isinstance(branches, list) else [branches]
+            else:
+                branch_list = [branch]
+            
             for b in branch_list:
-                if b in _CELL_TO_NUCLEI_BRANCH:
-                    needed_nuclei = _CELL_TO_NUCLEI_BRANCH[b]
-                    if needed_nuclei not in branch_list:
-                        self.logger.warning(
-                            f"  ⚠ Constrained watershed enabled, but '{needed_nuclei}' is not in "
-                            f"branches list.  '{b}' will fall back to standard HoVer-Net watershed. "
-                            f"Add '{needed_nuclei}' to branches to activate constrained watershed."
-                        )
-        # ──────────────────────────────────────────────────────────────────────
-        
-        # Process single or multiple branches
-        if len(branch_list) == 1:
-            return self._process_single_branch(
-                wsi_path=wsi_path,
-                wsi_path_mif=wsi_path_mif,
-                branch=branch_list[0],
-                output_dir=output_dir,
-                clean_overlaps=clean_overlaps,
-                iou_threshold=iou_threshold,
-                save_masks=save_masks,
-                save_json=save_json,
-                save_geojson=save_geojson,
-                save_csv=save_csv,
-                save_visualization=save_visualization,
-                filter_tissue=filter_tissue,
-                tissue_threshold=tissue_threshold,
-                detection_threshold=detection_threshold,
-                min_area_um=min_area_um,
-                mpp_override=mpp_override,
-                simplify_epsilon=simplify_epsilon,
-                coord_precision=coord_precision,
-                save_parquet=save_parquet,
-            )
-        else:
-            # ─── NEW: Multi-branch with per-tile nuclei caching ─────────────
-            # Instead of processing branches sequentially (each doing a full
-            # pass over all tiles), we process ALL branches together tile-by-tile.
-            # This way we naturally have the nuclei inst_map available when we
-            # process the cell branch on the same tile.
+                if b not in self.SUPPORTED_BRANCHES:
+                    raise ValueError(f"Unsupported branch: {b}")
+            
+            # Check constrained watershed requirements
+            if self.use_constrained_watershed:
+                for b in branch_list:
+                    if b in _CELL_TO_NUCLEI_BRANCH:
+                        needed_nuclei = _CELL_TO_NUCLEI_BRANCH[b]
+                        if needed_nuclei not in branch_list:
+                            self.logger.warning(f"  ⚠ '{b}' needs '{needed_nuclei}' for constrained watershed. Using fallback.")
+
+            # ALWAYS use the optimized multi-branch batch processor
             return self._process_multi_branch(
                 wsi_path=wsi_path,
                 wsi_path_mif=wsi_path_mif,
@@ -390,263 +282,201 @@ class WSIPredictor:
                 coord_precision=coord_precision,
                 save_parquet=save_parquet,
             )
-            # ─────────────────────────────────────────────────────────────────
 
     # =========================================================================
     # NEW: Multi-branch processing — runs all branches per tile together
     # =========================================================================
-    def _process_multi_branch(
-        self,
-        wsi_path,
-        wsi_path_mif,
-        branch_list,
-        output_dir,
-        clean_overlaps,
-        iou_threshold,
-        save_masks,
-        save_json,
-        save_geojson,
-        save_csv,
-        save_visualization,
-        filter_tissue,
-        tissue_threshold,
-        detection_threshold,
-        min_area_um,
-        mpp_override,
-        simplify_epsilon,
-        coord_precision,
-        save_parquet,
-    ):
-        """Process multiple branches together, tile by tile.
+    def _process_multi_branch(self, wsi_path, wsi_path_mif, branch_list, output_dir, clean_overlaps, iou_threshold, save_masks, save_json, save_geojson, save_csv, save_visualization, filter_tissue, tissue_threshold, detection_threshold, min_area_um, mpp_override, simplify_epsilon, coord_precision, save_parquet):
+            """OPTIMIZED: Process tiles in batches for max GPU throughput."""
+            
+            # ── shared setup ─────────────────────
+            mpp = mpp_override if mpp_override is not None else self.target_mpp
+            detected_mag = None
 
-        This is the key enabler for constrained watershed: by iterating tiles
-        once and running every branch on each tile before moving to the next,
-        we can pass the nuclei inst_map directly into the cell branch without
-        any extra storage or a second pass.
+            try:
+                temp_reader = self.wsi_handler.get_wsi_reader(wsi_path)
+                if hasattr(temp_reader, 'mpp') and temp_reader.mpp is not None:
+                    mpp = temp_reader.mpp if mpp_override is None else mpp
+                if hasattr(temp_reader, 'magnification') and temp_reader.magnification is not None:
+                    detected_mag = temp_reader.magnification
+                temp_reader.close()
+            except Exception:
+                pass
 
-        For branches that don't need constrained watershed (or when it's disabled),
-        this is functionally identical to processing them sequentially — just
-        slightly more memory-efficient since tile data is loaded once.
-        """
-        # ── shared setup (MPP, scale_factor, tile grid) ─────────────────────
-        mpp = mpp_override if mpp_override is not None else self.target_mpp
-        detected_mag = None
+            scale_factor = mpp / MODEL_TRAINING_MPP
+            magnification_to_use = detected_mag if detected_mag is not None else self.magnification
+            self.logger.info(f"🔍 Resolution: MPP={mpp:.4f}, scale={scale_factor:.2f}x, Batch Size={self.batch_size}")
 
-        # Auto-detect MPP
-        try:
-            temp_reader = self.wsi_handler.get_wsi_reader(wsi_path)
-            if hasattr(temp_reader, 'mpp') and temp_reader.mpp is not None:
-                mpp = temp_reader.mpp if mpp_override is None else mpp
-                self.logger.info(f"   ✓ Auto-detected MPP: {mpp:.4f} μm/px")
-            if hasattr(temp_reader, 'magnification') and temp_reader.magnification is not None:
-                detected_mag = temp_reader.magnification
-            temp_reader.close()
-        except Exception:
-            pass
+            # ── open WSI & build tile grid ────────────────────────────────────
+            wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
+            image_mif = None
+            if self.is_dual_model and not self.use_synthetic_mif and wsi_path_mif is not None:
+                image_mif = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
+                image_mif = np.transpose(image_mif, (1, 2, 0))
+                self.tile_processor.mif_image = image_mif
 
-        scale_factor = mpp / MODEL_TRAINING_MPP
-        magnification_to_use = detected_mag if detected_mag is not None else self.magnification
+            positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
+                wsi_reader_he, filter_tissue=filter_tissue, tissue_threshold=tissue_threshold,
+                tissue_dilation=self.tissue_dilation, scale_factor=scale_factor,
+            )
 
-        self.logger.info(f"🔍 Resolution matching: MPP={mpp:.4f}, scale={scale_factor:.2f}x")
-
-        # ── open WSI & build tile grid ────────────────────────────────────
-        wsi_reader_he = self.wsi_handler.get_wsi_reader(wsi_path)
-
-        # MIF setup (dual model, real MIF)
-        image_mif = None
-        if self.is_dual_model and not self.use_synthetic_mif and wsi_path_mif is not None:
-            image_mif = self.wsi_handler.load_mif_image(wsi_path_mif, self.mif_channel_config)
-            image_mif = np.transpose(image_mif, (1, 2, 0))
-            self.tile_processor.mif_image = image_mif
-
-        positions, (n_h, n_w), tile_mask = self.tile_processor.extract_tiles_streaming(
-            wsi_reader_he,
-            filter_tissue=filter_tissue,
-            tissue_threshold=tissue_threshold,
-            tissue_dilation=self.tissue_dilation,
-            scale_factor=scale_factor,
-        )
-
-        # ── determine which cell branches can use constrained WS ──────────
-        # A cell branch can use constrained WS only if:
-        #   1. use_constrained_watershed is True
-        #   2. its matching nuclei branch is also in branch_list
-        constrained_cell_branches = set()
-        if self.use_constrained_watershed:
-            for b in branch_list:
-                if b in _CELL_TO_NUCLEI_BRANCH:
-                    nuclei_b = _CELL_TO_NUCLEI_BRANCH[b]
-                    if nuclei_b in branch_list:
+            constrained_cell_branches = set()
+            if self.use_constrained_watershed:
+                for b in branch_list:
+                    if b in _CELL_TO_NUCLEI_BRANCH and _CELL_TO_NUCLEI_BRANCH[b] in branch_list:
                         constrained_cell_branches.add(b)
-                        self.logger.info(f"   🔗 {b} will use constrained watershed (seeds from {nuclei_b})")
 
-        # ── per-branch accumulator ────────────────────────────────────────
-        all_cells_per_branch = {b: [] for b in branch_list}
+            all_cells_per_branch = {b: [] for b in branch_list}
+            
+            # ── BATCH CONTAINERS ──────────────────────────────────────────────
+            batch_he_tiles = []
+            batch_mif_tiles = [] 
+            batch_metadata = [] 
 
-        # ── tile loop ─────────────────────────────────────────────────────
-        self.logger.info(f"🧠 Running predictions ({len(branch_list)} branches, constrained-WS on "
-                         f"{len(constrained_cell_branches)} cell branch(es))...")
+            self.logger.info(f"🧠 Running Batch Inference...")
 
-        for idx, position in enumerate(tqdm(positions, desc="Processing tiles")):
-            if tile_mask is not None and not tile_mask[idx]:
-                continue
+            for idx, position in enumerate(tqdm(positions, desc="Processing")):
+                if tile_mask is not None and not tile_mask[idx]:
+                    continue
 
-            tile_row = idx // n_w
-            tile_col = idx % n_w
-            grid_position = (tile_row, tile_col, n_h, n_w)
+                tile_row, tile_col = idx // n_w, idx % n_w
+                grid_position = (tile_row, tile_col, n_h, n_w)
 
-            # ── load tile data once ─────────────────────────────────────
-            tile_he = self.tile_processor.read_tile(position)
+                # 1. LOAD TILE (CPU IO)
+                tile_he = self.tile_processor.read_tile(position)
+                
+                # 2. FAST PRE-NORM (CPU)
+                # Convert to float32 [0,1] immediately to save copies later
+                if tile_he.max() > 1.0:
+                    tile_he = tile_he.astype(np.float32) / 255.0
+                
+                tile_mif = None
+                if self.is_dual_model:
+                    if self.use_synthetic_mif:
+                        tile_mif = self._generate_synthetic_mif(tile_he) 
+                        tile_mif = tile_mif.astype(np.float32) 
+                    elif image_mif is not None:
+                        tile_mif = self.tile_processor.read_tile_mif(position)
+                        if tile_mif.max() > 1.0:
+                            tile_mif = tile_mif.astype(np.float32) / 255.0
 
-            tile_mif = None
-            if self.is_dual_model:
-                if self.use_synthetic_mif:
-                    tile_he_norm = tile_he.astype(np.float32) / 255.0 if tile_he.max() > 1.0 else tile_he
-                    tile_mif = self._generate_synthetic_mif(tile_he_norm)
-                    tile_mif = (tile_mif * 255).astype(np.uint8)
-                elif image_mif is not None:
-                    tile_mif = self.tile_processor.read_tile_mif(position)
+                # 3. ADD TO BATCH
+                batch_he_tiles.append(tile_he)
+                if self.is_dual_model:
+                    batch_mif_tiles.append(tile_mif)
+                batch_metadata.append({'pos': position, 'grid': grid_position})
 
-            # ── run model ONCE — it returns ALL branch outputs together ──
-            # We pick out what we need per branch below.
-            # Determine the "actual" branch for the model call.
-            # For dual models with real/synthetic MIF, he_ branches redirect to mif_ outputs.
-            # We only need ONE forward pass regardless of how many branches we read.
+                # 4. EXECUTE BATCH IF FULL OR LAST
+                if len(batch_he_tiles) >= self.batch_size or idx == len(positions) - 1:
+                    if len(batch_he_tiles) == 0: continue
+
+                    self._process_batch_buffer(
+                        batch_he_tiles, batch_mif_tiles, batch_metadata,
+                        branch_list, constrained_cell_branches,
+                        all_cells_per_branch, magnification_to_use, mpp,
+                        detection_threshold, min_area_um, scale_factor
+                    )
+                    
+                    # Clear buffers
+                    batch_he_tiles = []
+                    batch_mif_tiles = []
+                    batch_metadata = []
+
+            # ── clean overlaps + export ───────────────────────────────────────
+            all_results = {}
+            for b in branch_list:
+                results = self._finalize_branch(
+                    branch=b, all_cells=all_cells_per_branch[b],
+                    wsi_path=wsi_path, wsi_path_mif=wsi_path_mif, output_dir=output_dir,
+                    clean_overlaps=clean_overlaps, iou_threshold=iou_threshold,
+                    save_masks=save_masks, save_json=save_json, save_geojson=save_geojson,
+                    save_csv=save_csv, save_visualization=save_visualization,
+                    simplify_epsilon=simplify_epsilon, coord_precision=coord_precision,
+                    save_parquet=save_parquet,
+                )
+                all_results[b] = results
+
+            return all_results
+
+    def _process_batch_buffer(self, batch_he, batch_mif, batch_meta, branch_list, constrained_branches, accumulator, mag, mpp, thresh, min_area, scale):
+            """Internal helper to execute one batch on GPU and unpack results."""
+            
+            # 1. Prepare Tensors (Stacking is fast)
+            tensor_he = torch.from_numpy(np.stack(batch_he)).permute(0, 3, 1, 2).contiguous().to(self.device)
+            tensor_mif = None
+            if self.is_dual_model and batch_mif:
+                tensor_mif = torch.from_numpy(np.stack(batch_mif)).permute(0, 3, 1, 2).contiguous().to(self.device)
+
+            # 2. Inference (Optimized Forward Pass)
             with torch.no_grad():
-                outputs = self._forward_pass(tile_he, tile_mif)
+                outputs = self._forward_pass_batch(tensor_he, tensor_mif)
 
-            # ── cache: nuclei inst_maps for constrained WS ─────────────
-            # keyed by nuclei branch name (e.g. 'he_nuclei', 'mif_nuclei')
-            nuclei_inst_maps = {}
-
-            # ── process branches in order: nuclei first, then cell ───────
-            # Sort so nuclei branches come before cell branches
+            # 3. Unpack Results to CPU
+            cpu_outputs = {}
             sorted_branches = sorted(branch_list, key=lambda b: (0 if 'nuclei' in b else 1))
 
             for b in sorted_branches:
-                # Determine which output keys to read
-                actual_b = b
-                if self.is_dual_model and 'he_' in b and tile_mif is not None:
-                    actual_b = b.replace('he_', 'mif_')
+                actual_b = b.replace('he_', 'mif_') if (self.is_dual_model and 'he_' in b and tensor_mif is not None) else b
+                cfg = self.SUPPORTED_BRANCHES[actual_b]
+                cpu_outputs[b] = {
+                    'seg': outputs[cfg['seg_key']][:, 0].cpu().numpy(),
+                    'hv': outputs[cfg['hv_key']].cpu().numpy()
+                }
 
-                branch_config = self.SUPPORTED_BRANCHES[actual_b]
-                seg  = outputs[branch_config['seg_key']][0, 0].cpu().numpy()
-                hv   = outputs[branch_config['hv_key']][0].cpu().numpy()
-                tile_pred = {'seg': seg, 'hv': hv}
+            # 4. Post-Process Each Tile in the Batch
+            for i in range(len(batch_meta)):
+                meta = batch_meta[i]
+                nuclei_inst_maps = {} 
 
-                # ── decide: constrained WS or standard? ────────────────
-                nuclei_inst_map_for_cell = None
+                for b in sorted_branches:
+                    tile_seg = cpu_outputs[b]['seg'][i]
+                    tile_hv = cpu_outputs[b]['hv'][i]
+                    tile_pred = {'seg': tile_seg, 'hv': tile_hv}
 
-                if b in constrained_cell_branches:
-                    # Look up the nuclei inst_map we cached earlier this tile
-                    nuclei_b = _CELL_TO_NUCLEI_BRANCH[b]
-                    nuclei_inst_map_for_cell = nuclei_inst_maps.get(nuclei_b)
-                    if nuclei_inst_map_for_cell is None:
-                        # Shouldn't happen if branch ordering is correct, but be safe
-                        self.logger.warning(f"   ⚠ Nuclei inst_map not found for {nuclei_b} on tile {idx}, "
-                                            f"falling back to standard watershed for {b}")
+                    # Resolve nuclei dependency
+                    nuclei_map = None
+                    if b in constrained_branches:
+                        nuclei_b = _CELL_TO_NUCLEI_BRANCH[b]
+                        nuclei_map = nuclei_inst_maps.get(nuclei_b)
 
-                cells_in_tile = self.tile_processor.process_tile_instances(
-                    tile_pred=tile_pred,
-                    position=position,
-                    magnification=magnification_to_use,
-                    mpp=mpp,
-                    detection_threshold=detection_threshold,
-                    min_area_um=min_area_um,
-                    use_gpu=True,
-                    scale_factor=scale_factor,
-                    grid_position=grid_position,
-                    # ── constrained WS args (None → standard path) ────
-                    nuclei_inst_map=nuclei_inst_map_for_cell,
-                    cell_threshold=self.cell_threshold,
-                )
-
-                all_cells_per_branch[b].extend(cells_in_tile)
-
-                # ── if this is a nuclei branch, cache its inst_map ─────
-                if 'nuclei' in b:
-                    # Re-run the standard extraction just to get inst_map
-                    # (process_tile_instances doesn't return it, but it's cheap)
-                    from vitaminp.postprocessing.hv_postprocess import process_model_outputs
-                    inst_map, _, _ = process_model_outputs(
-                        seg_pred=tile_pred['seg'],
-                        h_map=tile_pred['hv'][0],
-                        v_map=tile_pred['hv'][1],
-                        magnification=magnification_to_use,
-                        binary_threshold=detection_threshold,
-                        min_area_um=min_area_um,
-                        use_gpu=True,
+                    cells = self.tile_processor.process_tile_instances(
+                        tile_pred=tile_pred, position=meta['pos'],
+                        magnification=mag, mpp=mpp, detection_threshold=thresh, 
+                        min_area_um=min_area, use_gpu=False, scale_factor=scale,
+                        grid_position=meta['grid'], nuclei_inst_map=nuclei_map,
+                        cell_threshold=self.cell_threshold,
                     )
-                    nuclei_inst_maps[b] = inst_map
+                    accumulator[b].extend(cells)
 
-        # ── post-loop: clean overlaps + export, per branch ───────────────
-        all_results = {}
-        for b in branch_list:
-            self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"Finalizing branch: {b}")
-            self.logger.info(f"{'='*60}")
+                    if 'nuclei' in b and self.use_constrained_watershed:
+                        from vitaminp.postprocessing.hv_postprocess import process_model_outputs
+                        inst_map, _, _ = process_model_outputs(
+                            seg_pred=tile_seg, h_map=tile_hv[0], v_map=tile_hv[1],
+                            magnification=mag, binary_threshold=thresh,
+                            min_area_um=min_area, use_gpu=False
+                        )
+                        nuclei_inst_maps[b] = inst_map
 
-            branch_output_dir = Path(output_dir) / b
-            results = self._finalize_branch(
-                branch=b,
-                all_cells=all_cells_per_branch[b],
-                wsi_path=wsi_path,
-                wsi_path_mif=wsi_path_mif,
-                output_dir=str(branch_output_dir),
-                clean_overlaps=clean_overlaps,
-                iou_threshold=iou_threshold,
-                save_masks=save_masks,
-                save_json=save_json,
-                save_geojson=save_geojson,
-                save_csv=save_csv,
-                save_visualization=save_visualization,
-                simplify_epsilon=simplify_epsilon,
-                coord_precision=coord_precision,
-                save_parquet=save_parquet,
-            )
-            all_results[b] = results
-
-        return all_results
-
-    def _forward_pass(self, tile_he, tile_mif=None):
-        """Run a single model forward pass and return the raw outputs dict.
-
-        This centralises the tensor prep + inference so _process_multi_branch
-        can call it once and then index into the outputs for each branch.
-        """
-        # Prepare H&E
-        if tile_he.max() > 1.0:
-            tile_he = tile_he.astype(np.float32) / 255.0
-        tile_he_tensor = torch.from_numpy(tile_he).permute(2, 0, 1).unsqueeze(0).to(self.device)
-
-        from vitaminp import prepare_he_input
-        tile_he_tensor = prepare_he_input(tile_he_tensor)
-        tile_he_tensor = self.preprocessor.percentile_normalize(tile_he_tensor)
-
-        if tile_mif is not None:
-            # Dual path
-            if tile_mif.max() > 1.0:
-                tile_mif = tile_mif.astype(np.float32) / 255.0
-            tile_mif_tensor = torch.from_numpy(tile_mif).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            tile_mif_tensor = self.preprocessor.percentile_normalize(tile_mif_tensor)
-
-            with torch.no_grad():
+    def _forward_pass_batch(self, tensor_he, tensor_mif=None):
+            """OPTIMIZED Forward Pass: Replaces slow quantile with fast normalization"""
+            
+            # FAST NORMALIZATION: Assumes input is float32 [0,1]
+            from vitaminp import prepare_he_input 
+            tensor_he = prepare_he_input(tensor_he) 
+            
+            if tensor_mif is not None:
                 if self.mixed_precision:
                     with torch.cuda.amp.autocast():
-                        outputs = self.model(tile_he_tensor, tile_mif_tensor)
+                        outputs = self.model(tensor_he, tensor_mif)
                 else:
-                    outputs = self.model(tile_he_tensor, tile_mif_tensor)
-        else:
-            # Single-modality path
-            with torch.no_grad():
+                    outputs = self.model(tensor_he, tensor_mif)
+            else:
                 if self.mixed_precision:
                     with torch.cuda.amp.autocast():
-                        outputs = self.model(tile_he_tensor)
+                        outputs = self.model(tensor_he)
                 else:
-                    outputs = self.model(tile_he_tensor)
-
-        return outputs
-
+                    outputs = self.model(tensor_he)
+            return outputs
     # =========================================================================
     # NEW: Shared finalisation (overlap cleaning + export) extracted so both
     #      single-branch and multi-branch paths can reuse it.

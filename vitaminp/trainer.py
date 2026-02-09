@@ -11,7 +11,7 @@ import os
 
 from .losses import DiceFocalLoss, HVLoss
 from .utils import SimplePreprocessing, compute_dice, prepare_he_input, prepare_mif_input
-
+from .evaluator import TestEvaluator
 
 class VitaminPTrainer:
     """
@@ -54,7 +54,8 @@ class VitaminPTrainer:
         use_wandb=True,
         project_name="vitamin-p",
         run_name=None,
-        checkpoint_dir="checkpoints"
+        checkpoint_dir="checkpoints",
+        test_loader=None,  # ← ADD
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -72,7 +73,10 @@ class VitaminPTrainer:
         
         # Initialize preprocessing
         self.preprocessor = SimplePreprocessing()
+        self.test_loader = test_loader  # ← ADD
         
+        # ← ADD THIS (after self.model_type is set)
+        self.evaluator = TestEvaluator(self.model, self.device, self.model_type)
         # Initialize losses
         self.seg_criterion = DiceFocalLoss(alpha=1, gamma=2)
         self.hv_criterion = HVLoss()
@@ -89,7 +93,7 @@ class VitaminPTrainer:
             self.wandb = wandb
             
             if run_name is None:
-                run_name = f"VitaminP-{self.model_type}-{model.model_size}_fold{fold}"
+                run_name = f"VitaminP-{self.model_type}-{model.model_size}_fold{fold}_hv2"
             
             wandb.init(
                 project=project_name,
@@ -110,6 +114,7 @@ class VitaminPTrainer:
             )
         
         self.best_val_loss = float('inf')
+        self.best_val_dice = 0.0  # ← ADD THIS LINE
     
     def _detect_model_type(self, model):
         """Detect model type: Dual, Syn, Flex, BaselineHE, or BaselineMIF"""
@@ -166,9 +171,9 @@ class VitaminPTrainer:
             
             # ❌ ISSUE: Only loading H&E ground truth
             # ✅ FIX: Load BOTH H&E and MIF ground truth
-            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+            he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
             he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+            he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
             he_cell_hv = batch['he_cell_hv'].to(self.device)
             
             mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -265,251 +270,269 @@ class VitaminPTrainer:
         return metrics
 
     def train_epoch_flex(self, use_augmentations=True):
-        """Train one epoch for VitaminPFlex (single-encoder with random modality)"""
-        self.model.train()
-        
-        metrics = {
-            'loss': 0,
-            'he_nuclei_dice': 0,
-            'he_cell_dice': 0,
-            'mif_nuclei_dice': 0,
-            'mif_cell_dice': 0,
-            'he_nuclei_hv_std': 0,
-            'he_cell_hv_std': 0,
-            'mif_nuclei_hv_std': 0,
-            'mif_cell_hv_std': 0,
-        }
-        
-        he_count = 0
-        mif_count = 0
-        
-        pbar = tqdm(self.train_loader, desc='Training', ncols=140)
-        
-        for batch in pbar:
-            he_img = batch['he_image'].to(self.device)
-            mif_img = batch['mif_image'].to(self.device)
+            """Train one epoch for VitaminPFlex (single-encoder with random modality)"""
+            self.model.train()
             
-            # ❌ ISSUE #1: ONLY loading H&E ground truth!
-            # This is WRONG - you need BOTH H&E and MIF ground truth
-            # nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
-            # cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            # nuclei_hv = batch['he_nuclei_hv'].to(self.device)
-            # cell_hv = batch['he_cell_hv'].to(self.device)
-            
-            # ✅ FIX: Load BOTH H&E and MIF ground truth
-            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
-            he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
-            he_cell_hv = batch['he_cell_hv'].to(self.device)
-            
-            mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
-            mif_cell_mask = batch['mif_cell_mask'].float().unsqueeze(1).to(self.device)
-            mif_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
-            mif_cell_hv = batch['mif_cell_hv'].to(self.device)
-            
-            batch_size = he_img.shape[0]
-            mixed_images = []
-            modality_labels = []
-            
-            # ✅ FIX: Prepare ground truth lists matching the modality
-            nuclei_masks = []
-            cell_masks = []
-            nuclei_hvs = []
-            cell_hvs = []
-            
-            # Random modality selection per sample
-            for i in range(batch_size):
-                use_mif = torch.rand(1).item() < 0.5
-                if use_mif:
-                    img = prepare_mif_input(mif_img[i:i+1])[0]
-                    modality_labels.append('mif')
-                    mif_count += 1
-                    # ✅ FIX: Use MIF ground truth for MIF samples
-                    nuclei_masks.append(mif_nuclei_mask[i])
-                    cell_masks.append(mif_cell_mask[i])
-                    nuclei_hvs.append(mif_nuclei_hv[i])
-                    cell_hvs.append(mif_cell_hv[i])
-                else:
-                    img = prepare_he_input(he_img[i:i+1])[0]
-                    modality_labels.append('he')
-                    he_count += 1
-                    # ✅ FIX: Use H&E ground truth for H&E samples
-                    nuclei_masks.append(mif_nuclei_mask[i])
-                    cell_masks.append(he_cell_mask[i])
-                    nuclei_hvs.append(mif_nuclei_hv[i])
-                    cell_hvs.append(he_cell_hv[i])
-                
-                img = self.preprocessor.percentile_normalize(img)
-                
-                if use_augmentations:
-                    img = self.preprocessor.apply_color_augmentations(img)
-                
-                mixed_images.append(img)
-            
-            mixed_batch = torch.stack(mixed_images, dim=0)
-            
-            # ✅ FIX: Stack the correct ground truth
-            nuclei_mask_batch = torch.stack(nuclei_masks, dim=0)
-            cell_mask_batch = torch.stack(cell_masks, dim=0)
-            nuclei_hv_batch = torch.stack(nuclei_hvs, dim=0)
-            cell_hv_batch = torch.stack(cell_hvs, dim=0)
-            
-            self.optimizer.zero_grad()
-            outputs = self.model(mixed_batch)
-            
-            # ❌ ISSUE #2: Computing loss for ALL decoders with H&E ground truth!
-            # This trains MIF decoders to predict H&E patterns - COMPLETELY WRONG!
-            
-            # ✅ FIX: Only compute loss for the decoder matching the input modality
-            total_loss = 0
-            loss_components = {
-                'he_nuclei_seg': 0, 'he_nuclei_hv': 0,
-                'he_cell_seg': 0, 'he_cell_hv': 0,
-                'mif_nuclei_seg': 0, 'mif_nuclei_hv': 0,
-                'mif_cell_seg': 0, 'mif_cell_hv': 0
+            metrics = {
+                'loss': 0,
+                'he_nuclei_dice': 0,
+                'he_cell_dice': 0,
+                'mif_nuclei_dice': 0,
+                'mif_cell_dice': 0,
+                'he_nuclei_hv_std': 0,
+                'he_cell_hv_std': 0,
+                'mif_nuclei_hv_std': 0,
+                'mif_cell_hv_std': 0,
             }
             
-            # Process each sample individually based on its modality
-            for i, modality in enumerate(modality_labels):
-                if modality == 'he':
-                    # Train H&E decoders with H&E ground truth
-                    loss_nuclei_seg = self.seg_criterion(
-                        outputs['he_nuclei_seg'][i:i+1],
-                        nuclei_mask_batch[i:i+1]
-                    )
-                    loss_nuclei_hv = self.hv_criterion(
-                        outputs['he_nuclei_hv'][i:i+1],
-                        nuclei_hv_batch[i:i+1],
-                        nuclei_mask_batch[i:i+1],
-                        self.device
-                    )
-                    loss_cell_seg = self.seg_criterion(
-                        outputs['he_cell_seg'][i:i+1],
-                        cell_mask_batch[i:i+1]
-                    )
-                    loss_cell_hv = self.hv_criterion(
-                        outputs['he_cell_hv'][i:i+1],
-                        cell_hv_batch[i:i+1],
-                        cell_mask_batch[i:i+1],
-                        self.device
-                    )
-                    
-                    loss_components['he_nuclei_seg'] += loss_nuclei_seg.item()
-                    loss_components['he_nuclei_hv'] += loss_nuclei_hv.item()
-                    loss_components['he_cell_seg'] += loss_cell_seg.item()
-                    loss_components['he_cell_hv'] += loss_cell_hv.item()
-                    
-                else:  # mif
-                    # Train MIF decoders with MIF ground truth
-                    loss_nuclei_seg = self.seg_criterion(
-                        outputs['mif_nuclei_seg'][i:i+1],
-                        nuclei_mask_batch[i:i+1]
-                    )
-                    loss_nuclei_hv = self.hv_criterion(
-                        outputs['mif_nuclei_hv'][i:i+1],
-                        nuclei_hv_batch[i:i+1],
-                        nuclei_mask_batch[i:i+1],
-                        self.device
-                    )
-                    loss_cell_seg = self.seg_criterion(
-                        outputs['mif_cell_seg'][i:i+1],
-                        cell_mask_batch[i:i+1]
-                    )
-                    loss_cell_hv = self.hv_criterion(
-                        outputs['mif_cell_hv'][i:i+1],
-                        cell_hv_batch[i:i+1],
-                        cell_mask_batch[i:i+1],
-                        self.device
-                    )
-                    
-                    loss_components['mif_nuclei_seg'] += loss_nuclei_seg.item()
-                    loss_components['mif_nuclei_hv'] += loss_nuclei_hv.item()
-                    loss_components['mif_cell_seg'] += loss_cell_seg.item()
-                    loss_components['mif_cell_hv'] += loss_cell_hv.item()
+            he_count = 0
+            # [MODIFICATION]: Track H&E samples that actually have cells (excludes PanNuke and Lizard)
+            he_cell_count = 0
+            mif_count = 0
+            
+            pbar = tqdm(self.train_loader, desc='Training', ncols=140)
+            # FIX: Add dynamic_ncols=False, position=0, leave=True for Kubernetes
+            pbar = tqdm(
+                self.train_loader, 
+                desc='Training', 
+                ncols=100,  # Reduced from 140 for better fit
+                dynamic_ncols=False,  # ← KEY FIX
+                position=0,           # ← KEY FIX
+                leave=True            # ← Keep bar after completion
+            )
+            for batch in pbar:
+                he_img = batch['he_image'].to(self.device)
+                mif_img = batch['mif_image'].to(self.device)
+                dataset_sources = batch['dataset_source']  # Critical for TissueNet/PanNuke/Lizard logic
                 
-                # Add to total loss
-                total_loss += (loss_nuclei_seg + 2.0 * loss_nuclei_hv + 
-                            loss_cell_seg + 2.0 * loss_cell_hv)
-            
-            # Average loss over batch
-            total_loss = total_loss / batch_size
-            
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-            self.optimizer.step()
-            
-            with torch.no_grad():
-                metrics['loss'] += total_loss.item()
+                # Load ALL ground truths (for both modalities)
+                mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                mif_cell_mask = batch['mif_cell_mask'].float().unsqueeze(1).to(self.device)
+                mif_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+                mif_cell_hv = batch['mif_cell_hv'].to(self.device)
                 
-                # Track metrics by modality with CORRECT ground truth
-                for i, modality in enumerate(modality_labels):
-                    if modality == 'he':
-                        metrics['he_nuclei_dice'] += compute_dice(
-                            (outputs['he_nuclei_seg'][i:i+1] > 0.5).float(),
-                            nuclei_mask_batch[i:i+1]
-                        ).item()
-                        metrics['he_cell_dice'] += compute_dice(
-                            (outputs['he_cell_seg'][i:i+1] > 0.5).float(),
-                            cell_mask_batch[i:i+1]
-                        ).item()
-                        metrics['he_nuclei_hv_std'] += outputs['he_nuclei_hv'][i:i+1].std().item()
-                        metrics['he_cell_hv_std'] += outputs['he_cell_hv'][i:i+1].std().item()
+                # Note: For CRC/Xenium, HE and MIF masks are usually the same, 
+                # but we load them separately to be safe.
+                he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
+                he_cell_hv = batch['he_cell_hv'].to(self.device)
+                # HE Nuclei mask is often shared with MIF in this dataset structure
+                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device) 
+                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
+
+                batch_size = he_img.shape[0]
+                mixed_images = []
+                modality_labels = []
+                # [MODIFICATION]: Track source labels to know which are PanNuke/Lizard
+                source_labels = []
+                
+                # Ground truth containers for the batch
+                nuclei_masks = []
+                cell_masks = []
+                nuclei_hvs = []
+                cell_hvs = []
+                
+                # --- MODALITY SELECTION & BATCH CONSTRUCTION ---
+                for i in range(batch_size):
+                    source = dataset_sources[i]
+                    source_labels.append(source)
+                    
+                    # Logic: Force MIF for TissueNet, Random for others
+                    # [MODIFICATION]: Force H&E for PanNuke AND Lizard
+                    if source == 'tissuenet':
+                        use_mif = True
+                    elif source in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']: # PanNuke and Lizard have no MIF
+                        use_mif = False
                     else:
-                        metrics['mif_nuclei_dice'] += compute_dice(
-                            (outputs['mif_nuclei_seg'][i:i+1] > 0.5).float(),
-                            nuclei_mask_batch[i:i+1]
-                        ).item()
-                        metrics['mif_cell_dice'] += compute_dice(
-                            (outputs['mif_cell_seg'][i:i+1] > 0.5).float(),
-                            cell_mask_batch[i:i+1]
-                        ).item()
-                        metrics['mif_nuclei_hv_std'] += outputs['mif_nuclei_hv'][i:i+1].std().item()
-                        metrics['mif_cell_hv_std'] += outputs['mif_cell_hv'][i:i+1].std().item()
+                        use_mif = torch.rand(1).item() < 0.5
+                    
+                    if use_mif:
+                        img = prepare_mif_input(mif_img[i:i+1])[0]
+                        modality_labels.append('mif')
+                        mif_count += 1
+                        
+                        # Use MIF Ground Truth
+                        nuclei_masks.append(mif_nuclei_mask[i])
+                        cell_masks.append(mif_cell_mask[i])
+                        nuclei_hvs.append(mif_nuclei_hv[i])
+                        cell_hvs.append(mif_cell_hv[i])
+                    else:
+                        img = prepare_he_input(he_img[i:i+1])[0]
+                        modality_labels.append('he')
+                        he_count += 1
+                        
+                        # Use HE Ground Truth
+                        nuclei_masks.append(he_nuclei_mask[i])
+                        cell_masks.append(he_cell_mask[i])
+                        nuclei_hvs.append(he_nuclei_hv[i])
+                        cell_hvs.append(he_cell_hv[i])
+                    
+                    # Preprocessing
+                    img = self.preprocessor.percentile_normalize(img)
+                    
+                    if use_augmentations:
+                        img = self.preprocessor.apply_color_augmentations(img)
+                    
+                    mixed_images.append(img)
                 
+                # Stack the mixed batch
+                mixed_batch = torch.stack(mixed_images, dim=0)
+                nuclei_mask_batch = torch.stack(nuclei_masks, dim=0)
+                cell_mask_batch = torch.stack(cell_masks, dim=0)
+                nuclei_hv_batch = torch.stack(nuclei_hvs, dim=0)
+                cell_hv_batch = torch.stack(cell_hvs, dim=0)
+                
+                # --- FORWARD PASS ---
+                self.optimizer.zero_grad()
+                outputs = self.model(mixed_batch)
+                
+                total_loss = 0
+                loss_components = {
+                    'he_nuclei_seg': 0, 'he_nuclei_hv': 0,
+                    'he_cell_seg': 0, 'he_cell_hv': 0,
+                    'mif_nuclei_seg': 0, 'mif_nuclei_hv': 0,
+                    'mif_cell_seg': 0, 'mif_cell_hv': 0
+                }
+                
+                # --- LOSS CALCULATION PER SAMPLE ---
+                # We must compute loss only for the specific decoder (HE or MIF) 
+                # that matches the input modality.
+                for i, modality in enumerate(modality_labels):
+                    # [MODIFICATION]: Get source to check for PanNuke/Lizard
+                    src = source_labels[i]
+
+                    if modality == 'he':
+                        prefix = 'he'
+                        out_n_seg = outputs['he_nuclei_seg'][i:i+1]
+                        out_n_hv = outputs['he_nuclei_hv'][i:i+1]
+                        out_c_seg = outputs['he_cell_seg'][i:i+1]
+                        out_c_hv = outputs['he_cell_hv'][i:i+1]
+                    else:
+                        prefix = 'mif'
+                        out_n_seg = outputs['mif_nuclei_seg'][i:i+1]
+                        out_n_hv = outputs['mif_nuclei_hv'][i:i+1]
+                        out_c_seg = outputs['mif_cell_seg'][i:i+1]
+                        out_c_hv = outputs['mif_cell_hv'][i:i+1]
+
+                    # Compute standard HoVer-Net losses
+                    loss_n_seg = self.seg_criterion(out_n_seg, nuclei_mask_batch[i:i+1])
+                    loss_n_hv = self.hv_criterion(out_n_hv, nuclei_hv_batch[i:i+1], nuclei_mask_batch[i:i+1], self.device)
+                    
+                    # [MODIFICATION]: Conditional Cell Loss
+                    # Zero out cell loss for PanNuke AND Lizard samples
+                    if src in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                        loss_c_seg = torch.tensor(0.0, device=self.device)
+                        loss_c_hv = torch.tensor(0.0, device=self.device)
+                    else:
+                        loss_c_seg = self.seg_criterion(out_c_seg, cell_mask_batch[i:i+1])
+                        loss_c_hv = self.hv_criterion(out_c_hv, cell_hv_batch[i:i+1], cell_mask_batch[i:i+1], self.device)
+                        
+                        # Increment valid cell counter if it's H&E and NOT PanNuke/Lizard
+                        if modality == 'he':
+                            he_cell_count += 1
+                    
+                    # Accumulate for logging
+                    loss_components[f'{prefix}_nuclei_seg'] += loss_n_seg.item()
+                    loss_components[f'{prefix}_nuclei_hv'] += loss_n_hv.item()
+                    loss_components[f'{prefix}_cell_seg'] += loss_c_seg.item()
+                    loss_components[f'{prefix}_cell_hv'] += loss_c_hv.item()
+                    
+                    # Weighted sum for backprop
+                    total_loss += (loss_n_seg + 4.0 * loss_n_hv + loss_c_seg + 2.0 * loss_c_hv)
+                
+                # Average over batch size
+                total_loss = total_loss / batch_size
+                
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                self.optimizer.step()
+                
+                # --- METRICS & LOGGING ---
+                with torch.no_grad():
+                    metrics['loss'] += total_loss.item()
+                    
+                    for i, modality in enumerate(modality_labels):
+                        src = source_labels[i]
+
+                        if modality == 'he':
+                            # Nuclei Dice
+                            metrics['he_nuclei_dice'] += compute_dice(
+                                (outputs['he_nuclei_seg'][i:i+1] > 0.5).float(), 
+                                nuclei_mask_batch[i:i+1]
+                            ).item()
+                            
+                            # [MODIFICATION]: Skip Cell Dice for PanNuke AND Lizard
+                            if src not in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                                metrics['he_cell_dice'] += compute_dice(
+                                    (outputs['he_cell_seg'][i:i+1] > 0.5).float(), 
+                                    cell_mask_batch[i:i+1]
+                                ).item()
+                                
+                            # HV Std (for monitoring collapse)
+                            metrics['he_nuclei_hv_std'] += outputs['he_nuclei_hv'][i:i+1].std().item()
+                            metrics['he_cell_hv_std'] += outputs['he_cell_hv'][i:i+1].std().item()
+                        else:
+                            metrics['mif_nuclei_dice'] += compute_dice(
+                                (outputs['mif_nuclei_seg'][i:i+1] > 0.5).float(), 
+                                nuclei_mask_batch[i:i+1]
+                            ).item()
+                            metrics['mif_cell_dice'] += compute_dice(
+                                (outputs['mif_cell_seg'][i:i+1] > 0.5).float(), 
+                                cell_mask_batch[i:i+1]
+                            ).item()
+                            metrics['mif_nuclei_hv_std'] += outputs['mif_nuclei_hv'][i:i+1].std().item()
+                            metrics['mif_cell_hv_std'] += outputs['mif_cell_hv'][i:i+1].std().item()
+                
+                # Progress Bar Update
                 current_he_n_std = outputs['he_nuclei_hv'].std().item()
                 current_mif_n_std = outputs['mif_nuclei_hv'].std().item()
-            
-            pbar.set_postfix({
-                'Loss': f'{total_loss.item():.4f}',
-                'HE_N_std': f'{current_he_n_std:.3f}',
-                'MIF_N_std': f'{current_mif_n_std:.3f}'
-            })
-            
-            # Batch logging
-            if self.use_wandb:
-                # Normalize loss components for logging
-                n_he = max(sum(1 for m in modality_labels if m == 'he'), 1)
-                n_mif = max(sum(1 for m in modality_labels if m == 'mif'), 1)
-                
-                self.wandb.log({
-                    "batch/loss": total_loss.item(),
-                    "batch/he_nuclei_seg_loss": loss_components['he_nuclei_seg'] / n_he,
-                    "batch/he_nuclei_hv_loss": loss_components['he_nuclei_hv'] / n_he,
-                    "batch/he_cell_seg_loss": loss_components['he_cell_seg'] / n_he,
-                    "batch/he_cell_hv_loss": loss_components['he_cell_hv'] / n_he,
-                    "batch/mif_nuclei_seg_loss": loss_components['mif_nuclei_seg'] / n_mif,
-                    "batch/mif_nuclei_hv_loss": loss_components['mif_nuclei_hv'] / n_mif,
-                    "batch/mif_cell_seg_loss": loss_components['mif_cell_seg'] / n_mif,
-                    "batch/mif_cell_hv_loss": loss_components['mif_cell_hv'] / n_mif,
-                    "batch/he_nuclei_hv_std": current_he_n_std,
-                    "batch/he_cell_hv_std": outputs['he_cell_hv'].std().item(),
-                    "batch/mif_nuclei_hv_std": current_mif_n_std,
-                    "batch/mif_cell_hv_std": outputs['mif_cell_hv'].std().item(),
+                pbar.set_postfix({
+                    'Loss': f'{total_loss.item():.4f}',
+                    'HE_N_std': f'{current_he_n_std:.3f}',
+                    'MIF_N_std': f'{current_mif_n_std:.3f}'
                 })
-        
-        # Normalize metrics
-        n_batches = len(self.train_loader)
-        metrics['loss'] /= n_batches
-        metrics['he_nuclei_dice'] /= max(he_count, 1)
-        metrics['he_cell_dice'] /= max(he_count, 1)
-        metrics['mif_nuclei_dice'] /= max(mif_count, 1)
-        metrics['mif_cell_dice'] /= max(mif_count, 1)
-        metrics['he_nuclei_hv_std'] /= max(he_count, 1)
-        metrics['he_cell_hv_std'] /= max(he_count, 1)
-        metrics['mif_nuclei_hv_std'] /= max(mif_count, 1)
-        metrics['mif_cell_hv_std'] /= max(mif_count, 1)
-        
-        return metrics
+                
+                # WandB Batch Logging
+                if self.use_wandb:
+                    # Calculate counts to avoid division by zero in logging
+                    n_he = max(sum(1 for m in modality_labels if m == 'he'), 1)
+                    n_mif = max(sum(1 for m in modality_labels if m == 'mif'), 1)
+                    
+                    self.wandb.log({
+                        "batch/loss": total_loss.item(),
+                        "batch/he_nuclei_seg_loss": loss_components['he_nuclei_seg'] / n_he,
+                        "batch/he_nuclei_hv_loss": loss_components['he_nuclei_hv'] / n_he,
+                        "batch/he_cell_seg_loss": loss_components['he_cell_seg'] / n_he,
+                        "batch/he_cell_hv_loss": loss_components['he_cell_hv'] / n_he,
+                        "batch/mif_nuclei_seg_loss": loss_components['mif_nuclei_seg'] / n_mif,
+                        "batch/mif_nuclei_hv_loss": loss_components['mif_nuclei_hv'] / n_mif,
+                        "batch/mif_cell_seg_loss": loss_components['mif_cell_seg'] / n_mif,
+                        "batch/mif_cell_hv_loss": loss_components['mif_cell_hv'] / n_mif,
+                        "batch/he_nuclei_hv_std": current_he_n_std,
+                        "batch/he_cell_hv_std": outputs['he_cell_hv'].std().item(),
+                        "batch/mif_nuclei_hv_std": current_mif_n_std,
+                        "batch/mif_cell_hv_std": outputs['mif_cell_hv'].std().item(),
+                    })
+            
+            # --- FINAL EPOCH METRIC AVERAGING ---
+            n_batches = len(self.train_loader)
+            
+            # Loss averaged over all batches
+            metrics['loss'] /= n_batches
+            
+            # Specific metrics averaged over the number of samples that actually contributed
+            metrics['he_nuclei_dice'] /= max(he_count, 1)
+            # [MODIFICATION]: Divide H&E Cell Dice by valid cell count (excluding PanNuke and Lizard)
+            metrics['he_cell_dice'] /= max(he_cell_count, 1)
+            metrics['mif_nuclei_dice'] /= max(mif_count, 1)
+            metrics['mif_cell_dice'] /= max(mif_count, 1)
+            
+            metrics['he_nuclei_hv_std'] /= max(he_count, 1)
+            metrics['he_cell_hv_std'] /= max(he_count, 1)
+            metrics['mif_nuclei_hv_std'] /= max(mif_count, 1)
+            metrics['mif_cell_hv_std'] /= max(mif_count, 1)
+            
+            return metrics
+
 
     def train_epoch_baseline_he(self, use_augmentations=True):
         """Train one epoch for VitaminPBaselineHE (H&E only)"""
@@ -523,15 +546,18 @@ class VitaminPTrainer:
             'he_cell_hv_std': 0,
         }
         
-        pbar = tqdm(self.train_loader, desc='Training', ncols=140)
+        he_cell_count = 0  # Track samples with valid cell masks
+        
+        pbar = tqdm(self.train_loader, desc='Training', ncols=100, dynamic_ncols=False, position=0, leave=True)
         
         for batch in pbar:
             he_img = batch['he_image'].to(self.device)
+            dataset_sources = batch['dataset_source']  # Get source labels
             
-            # Load H&E ground truth only
-            he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+            # Load H&E ground truth
+            he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
             he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-            he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+            he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
             he_cell_hv = batch['he_cell_hv'].to(self.device)
             
             # Apply preprocessing
@@ -547,32 +573,61 @@ class VitaminPTrainer:
             self.optimizer.zero_grad()
             outputs = self.model(he_img)
             
-            # Compute losses
-            loss_he_nuclei_seg = self.seg_criterion(outputs['he_nuclei_seg'], he_nuclei_mask)
-            loss_he_nuclei_hv = self.hv_criterion(outputs['he_nuclei_hv'], he_nuclei_hv, he_nuclei_mask, self.device)
-            loss_he_cell_seg = self.seg_criterion(outputs['he_cell_seg'], he_cell_mask)
-            loss_he_cell_hv = self.hv_criterion(outputs['he_cell_hv'], he_cell_hv, he_cell_mask, self.device)
+            # --- LOSS CALCULATION PER SAMPLE (handles PanNuke/Lizard) ---
+            batch_size = he_img.shape[0]
+            total_loss = 0
             
-            # Total loss (average of nuclei and cell)
-            total_loss = (
-                loss_he_nuclei_seg + 2.0 * loss_he_nuclei_hv +
-                loss_he_cell_seg + 2.0 * loss_he_cell_hv
-            ) / 2.0
+            for i in range(batch_size):
+                src = dataset_sources[i]
+                
+                # Nuclei loss (always computed)
+                loss_n_seg = self.seg_criterion(outputs['he_nuclei_seg'][i:i+1], he_nuclei_mask[i:i+1])
+                loss_n_hv = self.hv_criterion(outputs['he_nuclei_hv'][i:i+1], he_nuclei_hv[i:i+1], he_nuclei_mask[i:i+1], self.device)
+                
+                # Cell loss (skip for PanNuke/Lizard/etc.)
+                if src in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                    loss_c_seg = torch.tensor(0.0, device=self.device)
+                    loss_c_hv = torch.tensor(0.0, device=self.device)
+                else:
+                    loss_c_seg = self.seg_criterion(outputs['he_cell_seg'][i:i+1], he_cell_mask[i:i+1])
+                    loss_c_hv = self.hv_criterion(outputs['he_cell_hv'][i:i+1], he_cell_hv[i:i+1], he_cell_mask[i:i+1], self.device)
+                    he_cell_count += 1
+                
+                total_loss += (loss_n_seg + 2.0 * loss_n_hv + loss_c_seg + 2.0 * loss_c_hv)
+            
+            # Average over batch
+            total_loss = total_loss / batch_size
             
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
             self.optimizer.step()
             
+            # --- METRICS ---
             with torch.no_grad():
                 metrics['loss'] += total_loss.item()
-                metrics['he_nuclei_dice'] += compute_dice((outputs['he_nuclei_seg'] > 0.5).float(), he_nuclei_mask).item()
-                metrics['he_cell_dice'] += compute_dice((outputs['he_cell_seg'] > 0.5).float(), he_cell_mask).item()
                 
-                current_he_n_std = outputs['he_nuclei_hv'].std().item()
-                current_he_c_std = outputs['he_cell_hv'].std().item()
-                
-                metrics['he_nuclei_hv_std'] += current_he_n_std
-                metrics['he_cell_hv_std'] += current_he_c_std
+                for i in range(batch_size):
+                    src = dataset_sources[i]
+                    
+                    # Nuclei Dice (always)
+                    metrics['he_nuclei_dice'] += compute_dice(
+                        (outputs['he_nuclei_seg'][i:i+1] > 0.5).float(), 
+                        he_nuclei_mask[i:i+1]
+                    ).item()
+                    
+                    # Cell Dice (skip for PanNuke/Lizard)
+                    if src not in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                        metrics['he_cell_dice'] += compute_dice(
+                            (outputs['he_cell_seg'][i:i+1] > 0.5).float(), 
+                            he_cell_mask[i:i+1]
+                        ).item()
+                    
+                    # HV Std
+                    metrics['he_nuclei_hv_std'] += outputs['he_nuclei_hv'][i:i+1].std().item()
+                    metrics['he_cell_hv_std'] += outputs['he_cell_hv'][i:i+1].std().item()
+            
+            current_he_n_std = outputs['he_nuclei_hv'].std().item()
+            current_he_c_std = outputs['he_cell_hv'].std().item()
             
             pbar.set_postfix({
                 'Loss': f'{total_loss.item():.4f}',
@@ -582,17 +637,19 @@ class VitaminPTrainer:
             if self.use_wandb:
                 self.wandb.log({
                     "batch/loss": total_loss.item(),
-                    "batch/he_nuclei_seg_loss": loss_he_nuclei_seg.item(),
-                    "batch/he_nuclei_hv_loss": loss_he_nuclei_hv.item(),
-                    "batch/he_cell_seg_loss": loss_he_cell_seg.item(),
-                    "batch/he_cell_hv_loss": loss_he_cell_hv.item(),
                     "batch/he_nuclei_hv_std": current_he_n_std,
                     "batch/he_cell_hv_std": current_he_c_std,
                 })
         
+        # --- FINAL AVERAGING ---
         n_batches = len(self.train_loader)
-        for key in metrics:
-            metrics[key] /= n_batches
+        total_samples = n_batches * self.train_loader.batch_size
+        
+        metrics['loss'] /= n_batches
+        metrics['he_nuclei_dice'] /= max(total_samples, 1)  # All samples have nuclei
+        metrics['he_cell_dice'] /= max(he_cell_count, 1)  # Only samples with cells
+        metrics['he_nuclei_hv_std'] /= max(total_samples, 1)
+        metrics['he_cell_hv_std'] /= max(total_samples, 1)
         
         return metrics
 
@@ -674,6 +731,7 @@ class VitaminPTrainer:
         
         return metrics
 
+
     def train_epoch(self, use_augmentations=True):
         """Route to appropriate training function based on model type"""
         if self.model_type == 'Dual' or self.model_type == 'Syn':
@@ -694,26 +752,30 @@ class VitaminPTrainer:
         
         metrics = {
             'loss': 0,
-            'he_nuclei_dice': 0,
-            'he_cell_dice': 0,
-            'mif_nuclei_dice': 0,
-            'mif_cell_dice': 0,
-            'he_nuclei_hv_std': 0,
-            'he_cell_hv_std': 0,
-            'mif_nuclei_hv_std': 0,
-            'mif_cell_hv_std': 0,
+            'he_nuclei_dice': 0, 'he_cell_dice': 0,
+            'mif_nuclei_dice': 0, 'mif_cell_dice': 0,
+            'he_nuclei_hv_std': 0, 'he_cell_hv_std': 0,
+            'mif_nuclei_hv_std': 0, 'mif_cell_hv_std': 0,
         }
         
+        # Counters for accurate averaging in Flex model
+        val_he_count = 0
+        val_he_cell_count = 0  # Track samples with valid cell masks (excludes PanNuke and Lizard)
+        val_mif_count = 0
+        val_batch_count = 0
+        
+        # ---------------------------------------------------------------------
+        # VALIDATION STRATEGY: DUAL / SYN
+        # ---------------------------------------------------------------------
         if self.model_type == 'Dual' or self.model_type == 'Syn':
-            # Dual model validation
             for batch in self.val_loader:
                 he_img = batch['he_image'].to(self.device)
                 mif_img = batch['mif_image'].to(self.device)
                 
-                # ✅ FIX: Load BOTH H&E and MIF ground truth
-                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                # Load GT
+                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -726,14 +788,12 @@ class VitaminPTrainer:
                 
                 outputs = self.model(he_img, mif_img)
                 
-                # ✅ FIX: Use correct ground truth for each decoder
-                # H&E decoders with H&E ground truth
+                # Loss Calculation
                 loss_he_nuclei_seg = self.seg_criterion(outputs['he_nuclei_seg'], he_nuclei_mask)
                 loss_he_nuclei_hv = self.hv_criterion(outputs['he_nuclei_hv'], he_nuclei_hv, he_nuclei_mask, self.device)
                 loss_he_cell_seg = self.seg_criterion(outputs['he_cell_seg'], he_cell_mask)
                 loss_he_cell_hv = self.hv_criterion(outputs['he_cell_hv'], he_cell_hv, he_cell_mask, self.device)
                 
-                # MIF decoders with MIF ground truth
                 loss_mif_nuclei_seg = self.seg_criterion(outputs['mif_nuclei_seg'], mif_nuclei_mask)
                 loss_mif_nuclei_hv = self.hv_criterion(outputs['mif_nuclei_hv'], mif_nuclei_hv, mif_nuclei_mask, self.device)
                 loss_mif_cell_seg = self.seg_criterion(outputs['mif_cell_seg'], mif_cell_mask)
@@ -748,7 +808,7 @@ class VitaminPTrainer:
                 
                 metrics['loss'] += batch_loss.item()
                 
-                # ✅ FIX: Compare predictions to correct ground truth
+                # Metrics
                 metrics['he_nuclei_dice'] += compute_dice((outputs['he_nuclei_seg'] > 0.5).float(), he_nuclei_mask).item()
                 metrics['he_cell_dice'] += compute_dice((outputs['he_cell_seg'] > 0.5).float(), he_cell_mask).item()
                 metrics['mif_nuclei_dice'] += compute_dice((outputs['mif_nuclei_seg'] > 0.5).float(), mif_nuclei_mask).item()
@@ -758,115 +818,191 @@ class VitaminPTrainer:
                 metrics['he_cell_hv_std'] += outputs['he_cell_hv'].std().item()
                 metrics['mif_nuclei_hv_std'] += outputs['mif_nuclei_hv'].std().item()
                 metrics['mif_cell_hv_std'] += outputs['mif_cell_hv'].std().item()
-        
+                
+                val_batch_count += 1
+            
+            # Average metrics
+            for key in metrics:
+                metrics[key] /= max(val_batch_count, 1)
+
+        # ---------------------------------------------------------------------
+        # VALIDATION STRATEGY: FLEX (CORRECTED FOR TISSUENET & PANNUKE & LIZARD)
+        # ---------------------------------------------------------------------
         elif self.model_type == 'Flex':
-            # Flex model validation (separate HE and MIF passes)
-            val_loss_he = 0
-            val_loss_mif = 0
+            val_loss_accum = 0
             
             for batch in self.val_loader:
-                # ✅ FIX: Load BOTH H&E and MIF ground truth
-                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                dataset_sources = batch['dataset_source']
+                
+                # Load GT - CORRECTED: Load both HE and MIF nuclei masks separately
+                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
-                mif_cell_mask = batch['mif_cell_mask'].float().unsqueeze(1).to(self.device)
                 mif_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+                mif_cell_mask = batch['mif_cell_mask'].float().unsqueeze(1).to(self.device)
                 mif_cell_hv = batch['mif_cell_hv'].to(self.device)
-                
-                # ✅ HE validation with H&E ground truth
-                he_img = prepare_he_input(batch['he_image'].to(self.device))
-                he_img = self.preprocessor.percentile_normalize(he_img)
-                outputs_he = self.model(he_img)
-                
-                loss_he = (
-                    self.seg_criterion(outputs_he['he_nuclei_seg'], he_nuclei_mask) +
-                    2.0 * self.hv_criterion(outputs_he['he_nuclei_hv'], he_nuclei_hv, he_nuclei_mask, self.device) +
-                    self.seg_criterion(outputs_he['he_cell_seg'], he_cell_mask) +
-                    2.0 * self.hv_criterion(outputs_he['he_cell_hv'], he_cell_hv, he_cell_mask, self.device)
-                ) / 2.0
-                
-                val_loss_he += loss_he.item()
-                metrics['he_nuclei_dice'] += compute_dice((outputs_he['he_nuclei_seg'] > 0.5).float(), he_nuclei_mask).item()
-                metrics['he_cell_dice'] += compute_dice((outputs_he['he_cell_seg'] > 0.5).float(), he_cell_mask).item()
-                metrics['he_nuclei_hv_std'] += outputs_he['he_nuclei_hv'].std().item()
-                metrics['he_cell_hv_std'] += outputs_he['he_cell_hv'].std().item()
-                
-                # ✅ MIF validation with MIF ground truth
-                mif_img = prepare_mif_input(batch['mif_image'].to(self.device))
-                mif_img = self.preprocessor.percentile_normalize(mif_img)
-                outputs_mif = self.model(mif_img)
-                
-                loss_mif = (
-                    self.seg_criterion(outputs_mif['mif_nuclei_seg'], mif_nuclei_mask) +
-                    2.0 * self.hv_criterion(outputs_mif['mif_nuclei_hv'], mif_nuclei_hv, mif_nuclei_mask, self.device) +
-                    self.seg_criterion(outputs_mif['mif_cell_seg'], mif_cell_mask) +
-                    2.0 * self.hv_criterion(outputs_mif['mif_cell_hv'], mif_cell_hv, mif_cell_mask, self.device)
-                ) / 2.0
-                
-                val_loss_mif += loss_mif.item()
-                metrics['mif_nuclei_dice'] += compute_dice((outputs_mif['mif_nuclei_seg'] > 0.5).float(), mif_nuclei_mask).item()
-                metrics['mif_cell_dice'] += compute_dice((outputs_mif['mif_cell_seg'] > 0.5).float(), mif_cell_mask).item()
-                metrics['mif_nuclei_hv_std'] += outputs_mif['mif_nuclei_hv'].std().item()
-                metrics['mif_cell_hv_std'] += outputs_mif['mif_cell_hv'].std().item()
-            
-            n_val = len(self.val_loader)
-            metrics['loss'] = (val_loss_he + val_loss_mif) / (2 * n_val)
 
+                # --- 1. HE VALIDATION PASS (Conditional) ---
+                # Only validate H&E on samples that actually HAVE H&E (not TissueNet)
+                valid_he_indices = [i for i, src in enumerate(dataset_sources) if src != 'tissuenet']
+                
+                if len(valid_he_indices) > 0:
+                    # Subset batch for H&E - USE HE GROUND TRUTH
+                    he_subset = batch['he_image'][valid_he_indices].to(self.device)
+                    n_mask_sub = he_nuclei_mask[valid_he_indices]
+                    c_mask_sub = he_cell_mask[valid_he_indices]
+                    n_hv_sub = he_nuclei_hv[valid_he_indices]
+                    c_hv_sub = he_cell_hv[valid_he_indices]
+                    
+                    # Get subset sources to check for PanNuke/Lizard
+                    subset_sources = [dataset_sources[i] for i in valid_he_indices]
+                    
+                    he_subset = prepare_he_input(he_subset)
+                    he_subset = self.preprocessor.percentile_normalize(he_subset)
+                    
+                    outputs_he = self.model(he_subset)
+                    
+                    # Iterate over subset to handle PanNuke/Lizard exclusion
+                    loss_he_batch = 0
+                    for k, src in enumerate(subset_sources):
+                        # Nuclei Loss (Always valid)
+                        l_n = (self.seg_criterion(outputs_he['he_nuclei_seg'][k:k+1], n_mask_sub[k:k+1]) +
+                               2.0 * self.hv_criterion(outputs_he['he_nuclei_hv'][k:k+1], n_hv_sub[k:k+1], n_mask_sub[k:k+1], self.device))
+                        
+                        # Cell Loss (Skip for PanNuke and Lizard)
+                        if src in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                            l_c = torch.tensor(0.0, device=self.device)
+                        else:
+                            l_c = (self.seg_criterion(outputs_he['he_cell_seg'][k:k+1], c_mask_sub[k:k+1]) +
+                                   2.0 * self.hv_criterion(outputs_he['he_cell_hv'][k:k+1], c_hv_sub[k:k+1], c_mask_sub[k:k+1], self.device))
+                            
+                            # Metrics for Cells (Only if not PanNuke/Lizard)
+                            metrics['he_cell_dice'] += compute_dice((outputs_he['he_cell_seg'][k:k+1] > 0.5).float(), c_mask_sub[k:k+1]).item()
+                            val_he_cell_count += 1
+                        
+                        loss_he_batch += (l_n + l_c)
+                        
+                        # Metrics for Nuclei (Always)
+                        metrics['he_nuclei_dice'] += compute_dice((outputs_he['he_nuclei_seg'][k:k+1] > 0.5).float(), n_mask_sub[k:k+1]).item()
+                        metrics['he_nuclei_hv_std'] += outputs_he['he_nuclei_hv'][k:k+1].std().item()
+                        metrics['he_cell_hv_std'] += outputs_he['he_cell_hv'][k:k+1].std().item()
+
+                    val_loss_accum += (loss_he_batch / len(valid_he_indices)).item()
+                    val_he_count += len(valid_he_indices)
+
+                # --- 2. MIF VALIDATION PASS (All Samples except PanNuke and Lizard) ---
+                # Valid for CRC, Xenium, TissueNet (PanNuke/Lizard has no MIF)
+                valid_mif_indices = [i for i, src in enumerate(dataset_sources) if src not in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']]
+                
+                if len(valid_mif_indices) > 0:
+                    mif_subset = batch['mif_image'][valid_mif_indices].to(self.device)
+                    n_mask_sub = mif_nuclei_mask[valid_mif_indices]
+                    c_mask_sub = mif_cell_mask[valid_mif_indices]
+                    n_hv_sub = mif_nuclei_hv[valid_mif_indices]
+                    c_hv_sub = mif_cell_hv[valid_mif_indices]
+                    
+                    mif_subset = prepare_mif_input(mif_subset)
+                    mif_subset = self.preprocessor.percentile_normalize(mif_subset)
+                    
+                    outputs_mif = self.model(mif_subset)
+                    
+                    loss_mif = (
+                        self.seg_criterion(outputs_mif['mif_nuclei_seg'], n_mask_sub) +
+                        2.0 * self.hv_criterion(outputs_mif['mif_nuclei_hv'], n_hv_sub, n_mask_sub, self.device) +
+                        self.seg_criterion(outputs_mif['mif_cell_seg'], c_mask_sub) +
+                        2.0 * self.hv_criterion(outputs_mif['mif_cell_hv'], c_hv_sub, c_mask_sub, self.device)
+                    ) / 2.0
+                    
+                    val_loss_accum += loss_mif.item()
+                    
+                    count = len(valid_mif_indices)
+                    metrics['mif_nuclei_dice'] += compute_dice((outputs_mif['mif_nuclei_seg'] > 0.5).float(), n_mask_sub).item() * count
+                    metrics['mif_cell_dice'] += compute_dice((outputs_mif['mif_cell_seg'] > 0.5).float(), c_mask_sub).item() * count
+                    metrics['mif_nuclei_hv_std'] += outputs_mif['mif_nuclei_hv'].std().item() * count
+                    metrics['mif_cell_hv_std'] += outputs_mif['mif_cell_hv'].std().item() * count
+                    
+                    val_mif_count += count
+                
+                val_batch_count += 1
+            
+            # Normalize Flex Metrics
+            metrics['loss'] = val_loss_accum / max(val_batch_count, 1)
+            
+            if val_he_count > 0:
+                metrics['he_nuclei_dice'] /= val_he_count
+                metrics['he_nuclei_hv_std'] /= val_he_count
+                metrics['he_cell_hv_std'] /= val_he_count
+                
+            if val_he_cell_count > 0:
+                metrics['he_cell_dice'] /= val_he_cell_count
+            
+            if val_mif_count > 0:
+                metrics['mif_nuclei_dice'] /= val_mif_count
+                metrics['mif_cell_dice'] /= val_mif_count
+                metrics['mif_nuclei_hv_std'] /= val_mif_count
+                metrics['mif_cell_hv_std'] /= val_mif_count
+        # ---------------------------------------------------------------------
+        # VALIDATION STRATEGY: BASELINE HE
+        # ---------------------------------------------------------------------
         elif self.model_type == 'BaselineHE':
-            # H&E baseline validation
-            metrics = {
-                'loss': 0,
-                'he_nuclei_dice': 0,
-                'he_cell_dice': 0,
-                'he_nuclei_hv_std': 0,
-                'he_cell_hv_std': 0,
-            }
+            val_loss_accum = 0
+            val_he_cell_count = 0  # Track samples with valid cell masks
             
             for batch in self.val_loader:
+                dataset_sources = batch['dataset_source']
                 he_img = batch['he_image'].to(self.device)
-                he_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
+                he_nuclei_mask = batch['he_nuclei_mask'].float().unsqueeze(1).to(self.device)
                 he_cell_mask = batch['he_cell_mask'].float().unsqueeze(1).to(self.device)
-                he_nuclei_hv = batch['mif_nuclei_hv'].to(self.device)
+                he_nuclei_hv = batch['he_nuclei_hv'].to(self.device)
                 he_cell_hv = batch['he_cell_hv'].to(self.device)
                 
                 he_img = self.preprocessor.percentile_normalize(he_img)
                 outputs = self.model(he_img)
                 
-                loss_he_nuclei_seg = self.seg_criterion(outputs['he_nuclei_seg'], he_nuclei_mask)
-                loss_he_nuclei_hv = self.hv_criterion(outputs['he_nuclei_hv'], he_nuclei_hv, he_nuclei_mask, self.device)
-                loss_he_cell_seg = self.seg_criterion(outputs['he_cell_seg'], he_cell_mask)
-                loss_he_cell_hv = self.hv_criterion(outputs['he_cell_hv'], he_cell_hv, he_cell_mask, self.device)
+                batch_size = he_img.shape[0]
+                batch_loss = 0
                 
-                batch_loss = (
-                    loss_he_nuclei_seg + 2.0 * loss_he_nuclei_hv +
-                    loss_he_cell_seg + 2.0 * loss_he_cell_hv
-                ) / 2.0
+                for i in range(batch_size):
+                    src = dataset_sources[i]
+                    
+                    # Nuclei loss (always)
+                    l_n = (self.seg_criterion(outputs['he_nuclei_seg'][i:i+1], he_nuclei_mask[i:i+1]) +
+                        2.0 * self.hv_criterion(outputs['he_nuclei_hv'][i:i+1], he_nuclei_hv[i:i+1], he_nuclei_mask[i:i+1], self.device))
+                    
+                    # Cell loss (skip for PanNuke/Lizard)
+                    if src in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']:
+                        l_c = torch.tensor(0.0, device=self.device)
+                    else:
+                        l_c = (self.seg_criterion(outputs['he_cell_seg'][i:i+1], he_cell_mask[i:i+1]) +
+                            2.0 * self.hv_criterion(outputs['he_cell_hv'][i:i+1], he_cell_hv[i:i+1], he_cell_mask[i:i+1], self.device))
+                        
+                        # Cell Dice (only for non-PanNuke/Lizard)
+                        metrics['he_cell_dice'] += compute_dice((outputs['he_cell_seg'][i:i+1] > 0.5).float(), he_cell_mask[i:i+1]).item()
+                        val_he_cell_count += 1
+                    
+                    batch_loss += (l_n + l_c)
+                    
+                    # Nuclei metrics (always)
+                    metrics['he_nuclei_dice'] += compute_dice((outputs['he_nuclei_seg'][i:i+1] > 0.5).float(), he_nuclei_mask[i:i+1]).item()
+                    metrics['he_nuclei_hv_std'] += outputs['he_nuclei_hv'][i:i+1].std().item()
+                    metrics['he_cell_hv_std'] += outputs['he_cell_hv'][i:i+1].std().item()
                 
-                metrics['loss'] += batch_loss.item()
-                metrics['he_nuclei_dice'] += compute_dice((outputs['he_nuclei_seg'] > 0.5).float(), he_nuclei_mask).item()
-                metrics['he_cell_dice'] += compute_dice((outputs['he_cell_seg'] > 0.5).float(), he_cell_mask).item()
-                metrics['he_nuclei_hv_std'] += outputs['he_nuclei_hv'].std().item()
-                metrics['he_cell_hv_std'] += outputs['he_cell_hv'].std().item()
+                val_loss_accum += (batch_loss / batch_size).item()
+                val_batch_count += batch_size
             
-            n_batches = len(self.val_loader)
-            for key in metrics:
-                metrics[key] /= n_batches
-            
-            return metrics
-        
+            # Average metrics
+            metrics['loss'] = val_loss_accum / len(self.val_loader)
+            metrics['he_nuclei_dice'] /= max(val_batch_count, 1)
+            metrics['he_cell_dice'] /= max(val_he_cell_count, 1)
+            metrics['he_nuclei_hv_std'] /= max(val_batch_count, 1)
+            metrics['he_cell_hv_std'] /= max(val_batch_count, 1)
+        # ---------------------------------------------------------------------
+        # VALIDATION STRATEGY: BASELINE MIF
+        # ---------------------------------------------------------------------
         elif self.model_type == 'BaselineMIF':
-            # MIF baseline validation
-            metrics = {
-                'loss': 0,
-                'mif_nuclei_dice': 0,
-                'mif_cell_dice': 0,
-                'mif_nuclei_hv_std': 0,
-                'mif_cell_hv_std': 0,
-            }
-            
             for batch in self.val_loader:
                 mif_img = batch['mif_image'].to(self.device)
                 mif_nuclei_mask = batch['mif_nuclei_mask'].float().unsqueeze(1).to(self.device)
@@ -892,21 +1028,11 @@ class VitaminPTrainer:
                 metrics['mif_cell_dice'] += compute_dice((outputs['mif_cell_seg'] > 0.5).float(), mif_cell_mask).item()
                 metrics['mif_nuclei_hv_std'] += outputs['mif_nuclei_hv'].std().item()
                 metrics['mif_cell_hv_std'] += outputs['mif_cell_hv'].std().item()
-            
-            n_batches = len(self.val_loader)
+                
+                val_batch_count += 1
+
             for key in metrics:
-                metrics[key] /= n_batches
-            
-            return metrics
-        # Average metrics
-        n_batches = len(self.val_loader)
-        if self.model_type != 'Flex':
-            for key in metrics:
-                metrics[key] /= n_batches
-        else:
-            for key in ['he_nuclei_dice', 'he_cell_dice', 'mif_nuclei_dice', 'mif_cell_dice',
-                    'he_nuclei_hv_std', 'he_cell_hv_std', 'mif_nuclei_hv_std', 'mif_cell_hv_std']:
-                metrics[key] /= n_batches
+                metrics[key] /= max(val_batch_count, 1)
         
         return metrics
 
@@ -1010,30 +1136,87 @@ class VitaminPTrainer:
             # Print metrics - CONDITIONAL
             print(f"\nEpoch {epoch+1}/{epochs}")
             print(f"Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
-            
+
+            # Calculate average Dice
             if self.model_type == 'BaselineHE':
-                print(f"Val Dice - HE: N={val_metrics['he_nuclei_dice']:.4f} C={val_metrics['he_cell_dice']:.4f}")
+                val_dice_avg = (val_metrics['he_nuclei_dice'] + val_metrics['he_cell_dice']) / 2
             elif self.model_type == 'BaselineMIF':
-                print(f"Val Dice - MIF: N={val_metrics['mif_nuclei_dice']:.4f} C={val_metrics['mif_cell_dice']:.4f}")
+                val_dice_avg = (val_metrics['mif_nuclei_dice'] + val_metrics['mif_cell_dice']) / 2
             else:
-                print(f"Val Dice - HE: N={val_metrics['he_nuclei_dice']:.4f} C={val_metrics['he_cell_dice']:.4f} | "
-                    f"MIF: N={val_metrics['mif_nuclei_dice']:.4f} C={val_metrics['mif_cell_dice']:.4f}")
-            
-            # Save best model
-            if val_metrics['loss'] < self.best_val_loss:
-                self.best_val_loss = val_metrics['loss']
+                val_dice_avg = (val_metrics['he_nuclei_dice'] + val_metrics['he_cell_dice'] + 
+                                val_metrics['mif_nuclei_dice'] + val_metrics['mif_cell_dice']) / 4
+
+            # Save best model (based on Dice instead of loss)
+            if val_dice_avg > self.best_val_dice:
+                self.best_val_dice = val_dice_avg
                 checkpoint_path = os.path.join(
                     self.checkpoint_dir,
-                    f'vitamin_p_{self.model_type.lower()}_{self.model.model_size}_fold{self.fold}_best.pth'
+                    f'vitamin_p_{self.model_type.lower()}_{self.model.model_size}_fold{self.fold}_hv4_best.pth'
                 )
                 torch.save(self.model.state_dict(), checkpoint_path)
                 
                 if self.use_wandb:
-                    self.wandb.log({"best_val_loss": self.best_val_loss})
+                    self.wandb.log({"best_val_dice": self.best_val_dice})
                 
-                print(f'✅ Best model saved! Val loss: {val_metrics["loss"]:.4f}\n')
-        
-        print(f"\n{'='*80}\nTraining Complete | Best Val Loss: {self.best_val_loss:.4f}\n{'='*80}")
+                print(f'✅ Best model saved! Dice: {val_dice_avg:.4f}\n')
+            # Test Evaluation - DEBUG VERSION
+            if self.test_loader and (epoch + 1) % 5 == 0:
+                print(f"\n{'='*80}")
+                print(f"🔍 DEBUG: Test evaluation triggered for epoch {epoch+1}")
+                print(f"   self.test_loader exists: {self.test_loader is not None}")
+                print(f"   self.use_wandb: {self.use_wandb}")
+                print(f"   Running evaluator.evaluate()...")
+                print(f"{'='*80}\n")
+                
+                test_results = self.evaluator.evaluate(self.test_loader)
+                
+                print(f"\n{'='*80}")
+                print(f"🔍 DEBUG: Evaluator returned")
+                print(f"   test_results is None: {test_results is None}")
+                print(f"   test_results type: {type(test_results)}")
+                if test_results:
+                    print(f"   test_results keys: {test_results.keys()}")
+                    if 'overall' in test_results:
+                        print(f"   overall keys: {test_results['overall'].keys()}")
+                        print(f"   dice_avg: {test_results['overall'].get('dice_avg', 'NOT FOUND')}")
+                print(f"{'='*80}\n")
+                
+                if self.use_wandb and test_results:
+                    print(f"🔍 DEBUG: Preparing WandB log...")
+                    overall = test_results['overall']
+                    
+                    # Build single log dict with ALL metrics
+                    test_log_dict = {
+                        "test/dice_avg": overall.get('dice_avg', 0),
+                        "test/pq_avg": overall.get('pq_avg', 0),
+                        "test/he_nuclei_pq": overall.get('he_nuclei_pq', 0),
+                        "test/he_cell_pq": overall.get('he_cell_pq', 0),
+                        "test/mif_nuclei_pq": overall.get('mif_nuclei_pq', 0),
+                        "test/mif_cell_pq": overall.get('mif_cell_pq', 0),
+                    }
+                    
+                    # Add per-dataset metrics to the same dict
+                    for dataset, metrics in test_results['per_dataset'].items():
+                        test_log_dict[f"test/{dataset}/dice_avg"] = metrics.get('dice_avg', 0)
+                        test_log_dict[f"test/{dataset}/pq_avg"] = metrics.get('pq_avg', 0)
+                    
+                    print(f"🔍 DEBUG: test_log_dict has {len(test_log_dict)} keys")
+                    print(f"🔍 DEBUG: Calling wandb.log()...")
+                    
+                    # Single wandb.log call
+                    self.wandb.log(test_log_dict)
+                    
+                    print(f"✅ Test metrics logged to WandB: dice_avg={overall.get('dice_avg', 0):.4f}")
+                else:
+                    print(f"❌ DEBUG: NOT logging to WandB")
+                    print(f"   Reason: use_wandb={self.use_wandb}, test_results={test_results is not None}")
+                
+                # Also print to console
+                if test_results:
+                    overall = test_results['overall']
+                    print(f"📊 Test Results: Dice={overall.get('dice_avg', 0):.4f}, PQ={overall.get('pq_avg', 0):.4f}\n")
+
+        print(f"\n{'='*80}\nTraining Complete | Best Val Dice: {self.best_val_dice:.4f}\n{'='*80}")
         
         if self.use_wandb:
             self.wandb.finish()

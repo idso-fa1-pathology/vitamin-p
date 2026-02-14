@@ -20,6 +20,7 @@ class MedicalImageAugmentation:
     - Photometric augmentations applied selectively (H&E only for color)
     - HV maps correctly transformed with geometric changes
     - Stain augmentation for H&E pathology images
+    - Random resize for magnification invariance
     """
     
     def __init__(self, config: Dict):
@@ -40,6 +41,10 @@ class MedicalImageAugmentation:
         self.rotation_angles = geom.get('rotation_angles', [90, 180, 270])
         self.scale_prob = geom.get('scale_prob', 0.25)
         self.scale_range = tuple(geom.get('scale_range', [0.95, 1.05]))
+        
+        # ⭐ NEW: Random resize for magnification invariance
+        self.random_resize_prob = geom.get('random_resize_prob', 0.0)
+        self.resize_range = tuple(geom.get('resize_range', [0.5, 2.0]))
         
         # Photometric params (H&E only)
         photo = config.get('photometric', {})
@@ -183,6 +188,16 @@ class MedicalImageAugmentation:
                     he_cell_hv_np, mif_nuclei_hv_np, mif_cell_hv_np, scale_factor
                 )
         
+        # ⭐ NEW: Random resize (magnification simulation)
+        if random.random() < self.random_resize_prob:
+            (he_np, mif_np, he_nuclei_mask_np, he_cell_mask_np,
+             mif_nuclei_mask_np, mif_cell_mask_np, he_nuclei_hv_np,
+             he_cell_hv_np, mif_nuclei_hv_np, mif_cell_hv_np) = self._apply_random_resize(
+                he_np, mif_np, he_nuclei_mask_np, he_cell_mask_np,
+                mif_nuclei_mask_np, mif_cell_mask_np, he_nuclei_hv_np,
+                he_cell_hv_np, mif_nuclei_hv_np, mif_cell_hv_np
+            )
+        
         # ====================================================================
         # PHOTOMETRIC AUGMENTATIONS (H&E only)
         # ====================================================================
@@ -325,6 +340,63 @@ class MedicalImageAugmentation:
             he_cell_mask_np = np.pad(he_cell_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')
             mif_nuclei_mask_np = np.pad(mif_nuclei_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')
             mif_cell_mask_np = np.pad(mif_cell_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')
+            he_nuclei_hv_np = np.pad(he_nuclei_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+            he_cell_hv_np = np.pad(he_cell_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+            mif_nuclei_hv_np = np.pad(mif_nuclei_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+            mif_cell_hv_np = np.pad(mif_cell_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+        
+        return (he_np, mif_np, he_nuclei_mask_np, he_cell_mask_np,
+                mif_nuclei_mask_np, mif_cell_mask_np, he_nuclei_hv_np,
+                he_cell_hv_np, mif_nuclei_hv_np, mif_cell_hv_np)
+    
+    def _apply_random_resize(self, he_np, mif_np, he_nuclei_mask_np, he_cell_mask_np,
+                             mif_nuclei_mask_np, mif_cell_mask_np, he_nuclei_hv_np,
+                             he_cell_hv_np, mif_nuclei_hv_np, mif_cell_hv_np):
+        """
+        ⭐ NEW: Random resize augmentation - simulates different magnifications
+        Resize to random scale, then crop/pad back to original size
+        This is specifically designed to make the model magnification-agnostic
+        """
+        h, w = he_np.shape[:2]
+        resize_factor = random.uniform(*self.resize_range)
+        new_h, new_w = int(h * resize_factor), int(w * resize_factor)
+        
+        # Resize all data
+        he_np = cv2.resize(he_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        mif_np = cv2.resize(mif_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        he_nuclei_mask_np = cv2.resize(he_nuclei_mask_np, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        he_cell_mask_np = cv2.resize(he_cell_mask_np, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        mif_nuclei_mask_np = cv2.resize(mif_nuclei_mask_np, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        mif_cell_mask_np = cv2.resize(mif_cell_mask_np, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        he_nuclei_hv_np = cv2.resize(he_nuclei_hv_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        he_cell_hv_np = cv2.resize(he_cell_hv_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        mif_nuclei_hv_np = cv2.resize(mif_nuclei_hv_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        mif_cell_hv_np = cv2.resize(mif_cell_hv_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Crop or pad back to original size
+        if resize_factor > 1.0:  # Crop center
+            start_y = (new_h - h) // 2
+            start_x = (new_w - w) // 2
+            he_np = he_np[start_y:start_y+h, start_x:start_x+w]
+            mif_np = mif_np[start_y:start_y+h, start_x:start_x+w]
+            he_nuclei_mask_np = he_nuclei_mask_np[start_y:start_y+h, start_x:start_x+w]
+            he_cell_mask_np = he_cell_mask_np[start_y:start_y+h, start_x:start_x+w]
+            mif_nuclei_mask_np = mif_nuclei_mask_np[start_y:start_y+h, start_x:start_x+w]
+            mif_cell_mask_np = mif_cell_mask_np[start_y:start_y+h, start_x:start_x+w]
+            he_nuclei_hv_np = he_nuclei_hv_np[start_y:start_y+h, start_x:start_x+w]
+            he_cell_hv_np = he_cell_hv_np[start_y:start_y+h, start_x:start_x+w]
+            mif_nuclei_hv_np = mif_nuclei_hv_np[start_y:start_y+h, start_x:start_x+w]
+            mif_cell_hv_np = mif_cell_hv_np[start_y:start_y+h, start_x:start_x+w]
+        else:  # Pad
+            pad_y = (h - new_h) // 2
+            pad_x = (w - new_w) // 2
+            he_np = np.pad(he_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+            mif_np = np.pad(mif_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
+            # Change these lines (around line 370-375):
+            he_nuclei_mask_np = np.pad(he_nuclei_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')  # ← CHANGE
+            he_cell_mask_np = np.pad(he_cell_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')  # ← CHANGE
+            mif_nuclei_mask_np = np.pad(mif_nuclei_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')  # ← CHANGE
+            mif_cell_mask_np = np.pad(mif_cell_mask_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x)), mode='reflect')  # ← CHANGE
             he_nuclei_hv_np = np.pad(he_nuclei_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
             he_cell_hv_np = np.pad(he_cell_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')
             mif_nuclei_hv_np = np.pad(mif_nuclei_hv_np, ((pad_y, h-new_h-pad_y), (pad_x, w-new_w-pad_x), (0, 0)), mode='reflect')

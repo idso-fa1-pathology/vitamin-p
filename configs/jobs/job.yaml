@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-flex-large-fold32-hv4  # Updated name to reflect syn model
+  name: vitamin-p-flex-large-hv4-newestblock-lr1e4-wd1e2-mif2-hugeaug  # ← Updated name to indicate UNI pretraining
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -30,16 +30,26 @@ spec:
             - "python"
             - "scripts/train.py"
             - "--model"
-            - "flex"      # Model type: dual, syn, flex, baseline_he, baseline_mif
+            - "flex"                          # Model type: dual, syn, flex, baseline_he, baseline_mif
             - "--size"
-            - "large"    # Model size: small, base, large, giant
+            - "large"                         # Model size: small, base, large, giant
             - "--fold"
-            - "32"        # Fold: 1, 2, 3, 4, 5
+            - "32"                            # Fold: 1, 2, 3, 4, 5, 11, 12, etc.
             - "--epochs"
             - "250"
-            # - "--freeze-backbone"     # ← ADD THIS LINE
+            # - "--pretrain"
+            # - "uni"                           # ← ENABLE UNI PRETRAINING
+            # - "--pretrain-path"
+            # - "/rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest/pretrain/pytorch_model.bin"  # ← Path to UNI weights (downloaded locally)
+            # - "--lr"
+            # - "1e-4"                          # Learning rate (1e-5 for frozen backbone)
+            # - "--weight-decay"
+            # - "1e-4"
+            # - "--freeze-backbone"           # ← OPTIONAL: Uncomment to freeze backbone
             - "--wandb-project"
-            - "vitamin-p"
+            - "vitamin-p-latest"
+            - "--checkpoint-dir"
+            - "checkpoints/"              # ← Separate checkpoint dir for UNI runs
           workingDir: /rsrch9/home/plm/idso_fa1_pathology/codes/yshokrollahi/vitamin-p-latest
           env:
             - name: WANDB_API_KEY

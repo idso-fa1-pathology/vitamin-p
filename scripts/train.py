@@ -6,11 +6,16 @@ Usage:
     python scripts/train.py --model flex --size large --fold 2
     python scripts/train.py --model baseline_he --size base --fold 1
     python scripts/train.py --model baseline_mif --size base --fold 1
+    
+    # WITH UNI PRETRAINING
+    python scripts/train.py --model flex --size large --fold 2 --pretrain uni
+    python scripts/train.py --model flex --size large --fold 2 --pretrain uni --freeze-backbone
 """
 
 import argparse
 import torch
 import sys
+import os
 from pathlib import Path
 
 # Add parent directory to path
@@ -56,6 +61,14 @@ def main():
     parser.add_argument('--freeze-backbone', action='store_true',
                        help='Freeze backbone weights')
     
+    # Pretraining configuration
+    parser.add_argument('--pretrain', type=str, default='none',
+                       choices=['none', 'uni'],
+                       help='Pretrained weights: none (random init) or uni (UNI histopathology pretraining)')
+    
+    parser.add_argument('--pretrain-path', type=str, default='./pretrain/pytorch_model.bin',
+                       help='Path to pretrained UNI weights file')
+    
     # W&B configuration
     parser.add_argument('--no-wandb', action='store_true',
                        help='Disable Weights & Biases logging')
@@ -72,7 +85,7 @@ def main():
     
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',
                        help='Checkpoint directory')
-    
+
     args = parser.parse_args()
     
     # Setup
@@ -118,6 +131,7 @@ def main():
     if args.model in ['dual', 'syn', 'baseline_he', 'baseline_mif']:
         print(f"Dropout rate: {args.dropout}")
     print(f"Freeze backbone: {args.freeze_backbone}")
+    print(f"Pretraining: {args.pretrain.upper()}")
     print(f"{'='*80}\n")
     
     try:
@@ -157,7 +171,7 @@ def main():
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n{'='*80}")
-        print(f"Model Statistics")
+        print(f"Model Statistics (Random Init)")
         print(f"{'='*80}")
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
@@ -170,12 +184,69 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     
+    # ========== LOAD PRETRAINED WEIGHTS (FIXED WITH PARTIAL LOADING) ==========
+    if args.pretrain == 'uni':
+        print(f"\n{'='*80}")
+        print(f"Loading UNI Pretrained Weights (Partial - Transformer Blocks)")
+        print(f"{'='*80}")
+        try:
+            # Check if file exists
+            if not os.path.exists(args.pretrain_path):
+                print(f"❌ Pretrain file not found: {args.pretrain_path}")
+                sys.exit(1)
+            
+            # Load weights
+            uni_weights = torch.load(args.pretrain_path, map_location=device)
+            print(f"✅ Loaded {len(uni_weights)} weight keys from UNI")
+            
+            # Add prefix 'dinov2.' to all keys
+            uni_weights_prefixed = {f'dinov2.{k}': v for k, v in uni_weights.items()}
+            
+            # Remove incompatible layers (different patch sizes)
+            incompatible_keys = [
+                'dinov2.pos_embed',
+                'dinov2.patch_embed.proj.weight',
+                'dinov2.patch_embed.proj.bias'
+            ]
+            uni_weights_filtered = {k: v for k, v in uni_weights_prefixed.items() 
+                                    if k not in incompatible_keys}
+            
+            print(f"✅ Filtered to {len(uni_weights_filtered)} compatible keys")
+            print(f"   (Kept transformer blocks, initialized patch_embed & pos_embed)")
+            
+            # Load into backbone
+            if hasattr(model, 'backbone'):
+                result = model.backbone.load_state_dict(uni_weights_filtered, strict=False)
+                print(f"✅ UNI weights loaded into backbone!")
+                print(f"   Missing keys (expected): {len(result.missing_keys)}")
+            elif hasattr(model, 'he_backbone'):
+                # For Dual/Syn models
+                model.he_backbone.load_state_dict(uni_weights_filtered, strict=False)
+                model.mif_backbone.load_state_dict(uni_weights_filtered, strict=False)
+                model.shared_backbone.load_state_dict(uni_weights_filtered, strict=False)
+                print(f"✅ UNI weights loaded into all backbones!")
+            
+            file_size_gb = os.path.getsize(args.pretrain_path) / (1024**3)
+            print(f"   File: {args.pretrain_path}")
+            print(f"   Size: {file_size_gb:.2f} GB")
+            
+        except Exception as e:
+            print(f"❌ Error loading UNI weights: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        
+        print(f"{'='*80}\n")
+    # ========== END PRETRAIN BLOCK ==========
+    # ========== END PRETRAIN BLOCK ==========
+    
     # Generate run name if not provided
     if args.run_name is None:
         aug_suffix = "" if args.no_augment else "-aug"
         freeze_suffix = "-frozen" if args.freeze_backbone else ""
+        pretrain_suffix = f"-{args.pretrain}" if args.pretrain != 'none' else ""
         model_name = args.model.replace('_', '-').title()
-        args.run_name = f"VitaminP{model_name}-{args.size}-fold{args.fold}{aug_suffix}{freeze_suffix}"
+        args.run_name = f"VitaminP{model_name}-{args.size}-fold{args.fold}{aug_suffix}{freeze_suffix}{pretrain_suffix}"
     
     # Initialize trainer
     print(f"{'='*80}")

@@ -49,7 +49,7 @@ class VitaminPTrainer:
         val_loader,
         device='cuda',
         lr=1e-4,
-        weight_decay=1e-4,
+        weight_decay=1e-2,
         fold=1,
         use_wandb=True,
         project_name="vitamin-p",
@@ -109,7 +109,7 @@ class VitaminPTrainer:
                     "fold": fold,
                     "focal_alpha": 1,
                     "focal_gamma": 2,
-                    "hv_weight": 2.0,
+                    "hv_weight": 4.0,
                 }
             )
         
@@ -343,7 +343,7 @@ class VitaminPTrainer:
                     elif source in ['pannuke', 'lizard', 'monuseg', 'tnbc', 'nuinsseg', 'cryonuseg', 'bc', 'consep', 'monusac', 'kumar', 'cpm17']: # PanNuke and Lizard have no MIF
                         use_mif = False
                     else:
-                        use_mif = torch.rand(1).item() < 0.5
+                        use_mif = torch.rand(1).item() < 0.2
                     
                     if use_mif:
                         img = prepare_mif_input(mif_img[i:i+1])[0]
@@ -593,7 +593,7 @@ class VitaminPTrainer:
                     loss_c_hv = self.hv_criterion(outputs['he_cell_hv'][i:i+1], he_cell_hv[i:i+1], he_cell_mask[i:i+1], self.device)
                     he_cell_count += 1
                 
-                total_loss += (loss_n_seg + 2.0 * loss_n_hv + loss_c_seg + 2.0 * loss_c_hv)
+                total_loss += (loss_n_seg + 4.0 * loss_n_hv + loss_c_seg + 2.0 * loss_c_hv)
             
             # Average over batch
             total_loss = total_loss / batch_size
@@ -1151,7 +1151,7 @@ class VitaminPTrainer:
                 self.best_val_dice = val_dice_avg
                 checkpoint_path = os.path.join(
                     self.checkpoint_dir,
-                    f'vitamin_p_{self.model_type.lower()}_{self.model.model_size}_fold{self.fold}_hv4_best.pth'
+                    f'vitamin_p_{self.model_type.lower()}_{self.model.model_size}_fold{self.fold}_hv4_mag_lr1e4__wd1e2_mif2_hugeaug_best.pth'
                 )
                 torch.save(self.model.state_dict(), checkpoint_path)
                 
@@ -1160,7 +1160,7 @@ class VitaminPTrainer:
                 
                 print(f'✅ Best model saved! Dice: {val_dice_avg:.4f}\n')
             # Test Evaluation - DEBUG VERSION
-            if self.test_loader and (epoch + 1) % 5 == 0:
+            if self.test_loader and (epoch + 1) % 20 == 0:
                 print(f"\n{'='*80}")
                 print(f"🔍 DEBUG: Test evaluation triggered for epoch {epoch+1}")
                 print(f"   self.test_loader exists: {self.test_loader is not None}")

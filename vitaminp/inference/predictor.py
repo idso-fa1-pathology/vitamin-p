@@ -21,7 +21,7 @@ from .tile_processor import TileProcessor
 from .overlap_cleaner import OverlapCleaner
 from .utils import ResultExporter, setup_logger
 
-MODEL_TRAINING_MPP = 0.263  # Geometric mean of training MPPs (0.2125, 0.3250)
+MODEL_TRAINING_MPP = 0.2125  # Geometric mean of training MPPs (0.2125, 0.3250)
 
 # ── Map each cell branch to its matching nuclei branch ───────────────────────
 _CELL_TO_NUCLEI_BRANCH = {

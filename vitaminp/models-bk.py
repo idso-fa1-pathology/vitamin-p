@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .backbone import DINOv2Backbone
-from .blocks import ConvBlock,SegmentationHead, ProjectionLayer, ASPP
+from .blocks import ConvBlock
 
 
 class VitaminPDual(nn.Module):
@@ -488,17 +488,22 @@ class VitaminPSyn(nn.Module):
 
 class VitaminPFlex(nn.Module):
     """
-    Vitamin-P Flex Pro: Single-Encoder with 4 Separate Decoders
+    Vitamin-P Flex: Single-Encoder with 4 Separate Decoders
     
-    Integrated SOTA features:
-    - Shared Encoder: DINOv2
-    - ASPP Bridge: Captures multi-scale context (DeepLabv3+ style)
-    - CoordConv Heads: Explicit spatial awareness for better HV maps
-    - GroupNorm: Replaces BatchNorm for training stability
+    Architecture:
+    - Shared Encoder: Single DINOv2 backbone for both H&E and MIF
+    - 4 Separate Decoders: HE nuclei, HE cell, MIF nuclei, MIF cell
+    - Training: Random modality selection per sample
     
     Args:
         model_size: One of 'small', 'base', 'large', 'giant'
         freeze_backbone: Whether to freeze DINOv2 weights
+    
+    Example:
+        >>> model = VitaminPFlex(model_size='base')
+        >>> # Can accept either H&E (3ch) or MIF (2ch+1zero = 3ch)
+        >>> img = torch.randn(2, 3, 512, 512)
+        >>> outputs = model(img)
     """
     def __init__(self, model_size='base', freeze_backbone=False):
         super().__init__()
@@ -524,23 +529,18 @@ class VitaminPFlex(nn.Module):
         self.dec_dims = dec_dims
         self.embed_dim = embed_dim
         
-        # --- MODIFICATION: ASPP Module ---
-        # Projects deeply encoded features (embed_dim) to the first decoder dimension (dec_dims[0])
-        # This acts as the bridge between Encoder and Decoder
-        self.aspp = ASPP(embed_dim, dec_dims[0])
-        
         # Projection layers for skip connections
-        self.proj3 = ProjectionLayer(embed_dim, dec_dims[0])
-        self.proj2 = ProjectionLayer(embed_dim, dec_dims[1])
-        self.proj1 = ProjectionLayer(embed_dim, dec_dims[2])
-        self.proj0 = ProjectionLayer(embed_dim, dec_dims[3])
+        self.proj3 = nn.Conv2d(embed_dim, dec_dims[0], 1)
+        self.proj2 = nn.Conv2d(embed_dim, dec_dims[1], 1)
+        self.proj1 = nn.Conv2d(embed_dim, dec_dims[2], 1)
+        self.proj0 = nn.Conv2d(embed_dim, dec_dims[3], 1)
         
         # Build decoders
         self._build_decoders()
         
-        print(f"✓ VitaminPFlex PRO initialized with {model_size} backbone")
-        print(f"  + ASPP Bridge Active (Context Enhancement)")
-        print(f"  + CoordConv Heads Active (Spatial Awareness)")
+        print(f"✓ VitaminPFlex initialized with {model_size} backbone")
+        print(f"  Architecture: Shared Encoder → 4 Separate Decoders")
+        print(f"  Embed dim: {embed_dim} | Decoder dims: {dec_dims}")
     
     def _build_decoders(self):
         """Build 4 separate decoder branches"""
@@ -552,8 +552,10 @@ class VitaminPFlex(nn.Module):
         self.dec3_he_nuclei = ConvBlock(dec_dims[1] + dec_dims[2], dec_dims[2])
         self.dec4_he_nuclei = ConvBlock(dec_dims[2] + dec_dims[3], dec_dims[3])
         self.final_he_nuclei = ConvBlock(dec_dims[3], 32)
-        # Using SegmentationHead from blocks.py (Handles CoordConv internally)
-        self.head_he_nuclei = SegmentationHead(in_ch=32)
+        self.head_he_nuclei = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 3, 1)
+        )
         
         # ========== HE CELL DECODER ==========
         self.dec1_he_cell = ConvBlock(dec_dims[0] + dec_dims[0], dec_dims[0])
@@ -561,7 +563,10 @@ class VitaminPFlex(nn.Module):
         self.dec3_he_cell = ConvBlock(dec_dims[1] + dec_dims[2], dec_dims[2])
         self.dec4_he_cell = ConvBlock(dec_dims[2] + dec_dims[3], dec_dims[3])
         self.final_he_cell = ConvBlock(dec_dims[3], 32)
-        self.head_he_cell = SegmentationHead(in_ch=32)
+        self.head_he_cell = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 3, 1)
+        )
         
         # ========== MIF NUCLEI DECODER ==========
         self.dec1_mif_nuclei = ConvBlock(dec_dims[0] + dec_dims[0], dec_dims[0])
@@ -569,7 +574,10 @@ class VitaminPFlex(nn.Module):
         self.dec3_mif_nuclei = ConvBlock(dec_dims[1] + dec_dims[2], dec_dims[2])
         self.dec4_mif_nuclei = ConvBlock(dec_dims[2] + dec_dims[3], dec_dims[3])
         self.final_mif_nuclei = ConvBlock(dec_dims[3], 32)
-        self.head_mif_nuclei = SegmentationHead(in_ch=32)
+        self.head_mif_nuclei = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 3, 1)
+        )
         
         # ========== MIF CELL DECODER ==========
         self.dec1_mif_cell = ConvBlock(dec_dims[0] + dec_dims[0], dec_dims[0])
@@ -577,7 +585,10 @@ class VitaminPFlex(nn.Module):
         self.dec3_mif_cell = ConvBlock(dec_dims[1] + dec_dims[2], dec_dims[2])
         self.dec4_mif_cell = ConvBlock(dec_dims[2] + dec_dims[3], dec_dims[3])
         self.final_mif_cell = ConvBlock(dec_dims[3], 32)
-        self.head_mif_cell = SegmentationHead(in_ch=32)
+        self.head_mif_cell = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 3, 1)
+        )
     
     def decode_branch(self, e5, e4, e3, e2, branch_name):
         """Generic decoder branch with skip connections"""
@@ -588,38 +599,37 @@ class VitaminPFlex(nn.Module):
         final_conv = getattr(self, f'final_{branch_name}')
         head = getattr(self, f'head_{branch_name}')
         
-        # 1. Start with ASPP-enhanced e5 feature
+        # Decoder path with skip connections
         d = F.interpolate(e5, size=e4.shape[2:], mode='bilinear', align_corners=False)
         d = torch.cat([d, self.proj3(e4)], dim=1)
         d = dec1(d)
         
-        # 2. Skip Connection 2
         d = F.interpolate(d, size=e3.shape[2:], mode='bilinear', align_corners=False)
         d = torch.cat([d, self.proj2(e3)], dim=1)
         d = dec2(d)
         
-        # 3. Skip Connection 3
         d = F.interpolate(d, size=e2.shape[2:], mode='bilinear', align_corners=False)
         d = torch.cat([d, self.proj1(e2)], dim=1)
         d = dec3(d)
         
-        # 4. Skip Connection 4 (High Res)
         target_h = e2.shape[2] * 2
         d = F.interpolate(d, size=(target_h, target_h), mode='bilinear', align_corners=False)
         e2_up = F.interpolate(self.proj0(e2), size=(target_h, target_h), mode='bilinear', align_corners=False)
         d = torch.cat([d, e2_up], dim=1)
         d = dec4(d)
         
-        # 5. Final features
         feat = final_conv(d)
         
         # Final upsampling to 512x512
         if feat.shape[2] != 512 or feat.shape[3] != 512:
             feat = F.interpolate(feat, size=(512, 512), mode='bilinear', align_corners=False)
         
-        # 6. Head (CoordConv -> Seg/HV)
-        # SegmentationHead returns (seg, hv) tuple
-        return head(feat)
+        out = head(feat)
+        
+        seg_out = torch.sigmoid(out[:, 0:1])
+        hv_out = torch.tanh(out[:, 1:3])
+        
+        return seg_out, hv_out
     
     def forward(self, x):
         """
@@ -646,15 +656,11 @@ class VitaminPFlex(nn.Module):
         e3 = features[layer_keys[1]]  # Mid
         e2 = features[layer_keys[0]]  # Early
         
-        # --- MODIFICATION: Apply ASPP to deepest feature ---
-        e5_aspp = self.aspp(e5)
-        
         # ========== 4 SEPARATE DECODERS ==========
-        # Passing e5_aspp instead of raw e5
-        he_nuclei_seg, he_nuclei_hv = self.decode_branch(e5_aspp, e4, e3, e2, 'he_nuclei')
-        he_cell_seg, he_cell_hv = self.decode_branch(e5_aspp, e4, e3, e2, 'he_cell')
-        mif_nuclei_seg, mif_nuclei_hv = self.decode_branch(e5_aspp, e4, e3, e2, 'mif_nuclei')
-        mif_cell_seg, mif_cell_hv = self.decode_branch(e5_aspp, e4, e3, e2, 'mif_cell')
+        he_nuclei_seg, he_nuclei_hv = self.decode_branch(e5, e4, e3, e2, 'he_nuclei')
+        he_cell_seg, he_cell_hv = self.decode_branch(e5, e4, e3, e2, 'he_cell')
+        mif_nuclei_seg, mif_nuclei_hv = self.decode_branch(e5, e4, e3, e2, 'mif_nuclei')
+        mif_cell_seg, mif_cell_hv = self.decode_branch(e5, e4, e3, e2, 'mif_cell')
         
         return {
             'he_nuclei_seg': he_nuclei_seg,
@@ -666,7 +672,6 @@ class VitaminPFlex(nn.Module):
             'mif_cell_seg': mif_cell_seg,
             'mif_cell_hv': mif_cell_hv,
         }
-
     
 class VitaminPBaselineHE(nn.Module):
     """

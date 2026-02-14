@@ -341,7 +341,7 @@ splits:
 dataloader:
   batch_size: 4
   num_workers: 16
-  pin_memory: true
+  pin_memory: True
   persistent_workers: true
   prefetch_factor: 2
   shuffle_train: true
@@ -356,8 +356,9 @@ processing:
   he_max_value: 255.0
   mif_max_value: 65535.0
 
+
 # ============================================================================
-# 5. AUGMENTATION SETTINGS - AGGRESSIVE (Multi-Dataset Optimized)
+# 5. AUGMENTATION SETTINGS - MAGNIFICATION AGNOSTIC
 # ============================================================================
 augmentation:
   train_augment: true
@@ -369,20 +370,25 @@ augmentation:
     flip_prob: 0.7              # Increased - histology is rotation-invariant
     rotation_prob: 0.6          # Increased - more diverse orientations
     rotation_angles: [90, 180, 270]
-    scale_prob: 0.5             # 2.7x increase - critical for multi-magnification
-    scale_range: [0.75, 1.35]     # Wider range for scale invariance
+    scale_prob: 0.9             # Slightly increased from 0.8
+    scale_range: [0.5, 2.0]     # Keep current range
+    
+    # ⭐ NEW: Random resize for magnification invariance
+    random_resize_prob: 0.85    # High probability - critical for mag agnostic
+    resize_range: [0.5, 2.0]    # Simulates 10x to 40x magnification range
   
   photometric:
-    brightness_prob: 0.5        # 2.5x increase - scanner variations
+    brightness_prob: 0.6        # Increased from 0.5 - scanner variations
     brightness_factor: 0.25     # 1.67x stronger effect
-    contrast_prob: 0.4          # 4x increase - staining intensity variations
+    contrast_prob: 0.5          # Increased from 0.4 - staining intensity variations
     contrast_factor: 0.25       # 1.67x stronger effect
   
   stain:
     stain_prob: 0.5             # 5x increase - CRITICAL for CRC+Xenium+PanNuke
     hue_shift_range: [-0.04, 0.04]      # 2.67x stronger - H&E stain variations
-    saturation_range: [0.7, 1.4]      # Much wider - different staining protocols
+    saturation_range: [0.7, 1.4]        # Much wider - different staining protocols
     value_range: [0.7, 1.3]
+    
   noise_blur:
     blur_prob: 0.4              # Keep - simulates focus variations
     blur_sigma_range: [0.1, 1.0]        # Slightly stronger blur
@@ -393,7 +399,6 @@ augmentation:
   cutout:
     cutout_prob: 0.35           # Slightly increased - occlusion robustness
     cutout_size_range: [10, 60] # Larger cutouts for better regularization
-
 # ============================================================================
 # 6. HV MAP GENERATION
 # ============================================================================

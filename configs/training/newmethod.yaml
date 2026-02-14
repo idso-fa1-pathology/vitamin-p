@@ -8,7 +8,7 @@
 # ============================================================================
 data:
   zarr_bases:
-    pannuke: "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/pannuke/zarr_data"
+    lizard: "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/lizard/zarr_data"
   cache_dir: "./cache"
   cache_filename: "multimodal_dataset_cache_fold1.pkl"
 
@@ -21,15 +21,28 @@ splits:
   # --------------------------------------------------------------------------
   train_samples:
     # --- PanNuke (Folds 1 & 2) ---
-    - Fold1
-    - Fold2
+
+    # --- Lizard (85% Split) ---
+    - lizard_train
+
+  # --------------------------------------------------------------------------
+  # VALIDATION SET (Model Selection / Tuning)
+  # --------------------------------------------------------------------------
   val_samples:
     # --- PanNuke (Fold 3) ---
-    - Fold3
-  test_samples:
-    # --- TissueNet ---
-    - Fold3
+    
+    # --- Lizard (5% Split) ---
+    - lizard_val
 
+
+  # --------------------------------------------------------------------------
+  # TEST SET (Final Evaluation)
+  # --------------------------------------------------------------------------
+  test_samples:
+    # --- Pannuke ---  
+
+    # --- Lizard (10% Split) ---
+    - lizard_test
 
   # --------------------------------------------------------------------------
   # GLOBAL SETTINGS
@@ -39,12 +52,112 @@ splits:
   test_ratio: 0.01
   random_seed: 42
 
-  # List of ALL folders to scan (must include every sample named above)
+  # List of ALL folders to scan (CORRECTED to match Zarr Group Names)
   all_samples:
-    # PanNuke
-    - Fold1
-    - Fold2
-    - Fold3
+    
+    # Lizard
+    - lizard_train
+    - lizard_val
+    - lizard_test
+    
+    # MoNuSeg
+    - monuseg_train
+    - monuseg_val
+    - monuseg_test
+    
+    # TNBC
+    - tnbc_train
+    - tnbc_val
+    - tnbc_test
+    
+    # NuInsSeg
+    - nuinsseg_train
+    - nuinsseg_val
+    - nuinsseg_test
+    
+    # CryoNuSeg
+    - cryonuseg_train
+    - cryonuseg_val
+    - cryonuseg_test
+    
+    # BC
+    - bc_train
+    - bc_val
+    - bc_test
+
+    # ConSep 
+    - consep_train
+    - consep_val
+    - consep_test
+
+    # MoNuSAC
+    - monusac_train
+    - monusac_val
+    - monusac_test
+
+    # Kumar
+    - kumar_train
+    - kumar_val
+    - kumar_test
+
+    # CPM-17
+    - cpm17_train
+    - cpm17_val
+    - cpm17_test
+
+    # Xenium
+    - breast
+    - cervical
+    - lung
+    - lungV1
+    - lymph_node
+    - ovarian
+    - pancreasV1
+    - prostate
+    - skin
+    
+    # CRC
+    - CRC01
+    - CRC02
+    - CRC03
+    - CRC04
+    - CRC05
+    - CRC06
+    - CRC07
+    - CRC08
+    - CRC09
+    - CRC10
+    - CRC11
+    - CRC12
+    - CRC13
+    - CRC14
+    - CRC15
+    - CRC16
+    - CRC17
+    - CRC18
+    - CRC19
+    - CRC20
+    - CRC21
+    - CRC22
+    - CRC23
+    - CRC24
+    - CRC25
+    - CRC26
+    - CRC27
+    - CRC28
+    - CRC29
+    - CRC30
+    - CRC31
+    - CRC32
+    - CRC33_01
+    - CRC33_02
+    - CRC34
+    - CRC35
+    - CRC36
+    - CRC37
+    - CRC38
+    - CRC39
+    - CRC40
 
 # ============================================================================
 # 3. DATALOADER SETTINGS
@@ -68,42 +181,42 @@ processing:
   mif_max_value: 65535.0
 
 # ============================================================================
-# 5. AUGMENTATION SETTINGS
+# 5. AUGMENTATION SETTINGS - AGGRESSIVE (Multi-Dataset Optimized)
 # ============================================================================
 augmentation:
   train_augment: true
   val_augment: false
   test_augment: false
-  augment_prob: 0.5
+  augment_prob: 1.0  # Always apply augmentation during training
   
   geometric:
-    flip_prob: 0.5
-    rotation_prob: 0.4
+    flip_prob: 0.7              # Increased - histology is rotation-invariant
+    rotation_prob: 0.6          # Increased - more diverse orientations
     rotation_angles: [90, 180, 270]
-    scale_prob: 0.15
-    scale_range: [0.97, 1.03]
+    scale_prob: 0.8             # 2.7x increase - critical for multi-magnification
+    scale_range: [0.5, 2.0]     # Wider range for scale invariance
   
   photometric:
-    brightness_prob: 0.2
-    brightness_factor: 0.15
-    contrast_prob: 0.1
-    contrast_factor: 0.15
+    brightness_prob: 0.5        # 2.5x increase - scanner variations
+    brightness_factor: 0.25     # 1.67x stronger effect
+    contrast_prob: 0.4          # 4x increase - staining intensity variations
+    contrast_factor: 0.25       # 1.67x stronger effect
   
   stain:
-    stain_prob: 0.1
-    hue_shift_range: [-0.03, 0.03]
-    saturation_range: [0.92, 1.08]
-  
+    stain_prob: 0.5             # 5x increase - CRITICAL for CRC+Xenium+PanNuke
+    hue_shift_range: [-0.04, 0.04]      # 2.67x stronger - H&E stain variations
+    saturation_range: [0.7, 1.4]      # Much wider - different staining protocols
+    value_range: [0.7, 1.3]
   noise_blur:
-    blur_prob: 0.4
-    blur_sigma_range: [0.1, 0.5]
-    noise_prob: 0.3
-    noise_he_std_range: [0.005, 0.025]
-    noise_mif_std_range: [0.002, 0.01]
+    blur_prob: 0.4              # Keep - simulates focus variations
+    blur_sigma_range: [0.1, 1.0]        # Slightly stronger blur
+    noise_prob: 0.35            # Slightly increased - sensor noise
+    noise_he_std_range: [0.005, 0.03]   # Slightly stronger
+    noise_mif_std_range: [0.002, 0.015] # Slightly stronger
   
   cutout:
-    cutout_prob: 0.3
-    cutout_size_range: [8, 24]
+    cutout_prob: 0.35           # Slightly increased - occlusion robustness
+    cutout_size_range: [10, 60] # Larger cutouts for better regularization
 
 # ============================================================================
 # 6. HV MAP GENERATION

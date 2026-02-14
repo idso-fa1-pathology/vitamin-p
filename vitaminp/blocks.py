@@ -9,12 +9,42 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class SELayer(nn.Module):
+    """
+    Squeeze-and-Excitation Layer - NEW ADDITION
+    
+    Channel attention mechanism that recalibrates channel-wise features.
+    Improves feature representation with minimal parameter overhead.
+    
+    Args:
+        channel (int): Number of input channels
+        reduction (int): Reduction ratio for bottleneck (default: 16)
+    """
+    def __init__(self, channel, reduction=16):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channel, channel // reduction, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(channel // reduction, channel, 1, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        return x * self.fc(x)
+
+
 class ConvBlock(nn.Module):
     """
-    Double Convolutional Block with BatchNorm and ReLU
+    Double Convolutional Block with GroupNorm, GELU, and SE attention
     
-    Standard U-Net style block: Conv -> BN -> ReLU -> Conv -> BN -> ReLU
+    Standard U-Net style block: Conv -> GN -> GELU -> Conv -> GN -> GELU -> SE
     Optional dropout for regularization.
+    
+    SOTA Updates:
+    - GroupNorm instead of BatchNorm for stability with small batches
+    - GELU activation (matches DINOv2 internal activations)
+    - Squeeze-and-Excitation for channel attention
     
     Args:
         in_ch (int): Number of input channels
@@ -22,7 +52,7 @@ class ConvBlock(nn.Module):
         dropout_rate (float): Dropout probability (default: 0.0, no dropout)
     
     Returns:
-        torch.Tensor: Output feature map after two convolutions
+        torch.Tensor: Output feature map after two convolutions + SE attention
     """
     
     def __init__(self, in_ch, out_ch, dropout_rate=0.0):
@@ -30,8 +60,8 @@ class ConvBlock(nn.Module):
         
         layers = [
             nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.GroupNorm(8, out_ch),
+            nn.GELU(),  # Changed from ReLU
         ]
         
         # Add dropout if specified
@@ -40,91 +70,124 @@ class ConvBlock(nn.Module):
         
         layers.extend([
             nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.GroupNorm(8, out_ch),
+            nn.GELU()  # Changed from ReLU
         ])
         
         self.conv = nn.Sequential(*layers)
+        self.se = SELayer(out_ch)  # NEW: Channel attention
     
     def forward(self, x):
-        return self.conv(x)
+        x = self.conv(x)
+        return self.se(x)  # Apply SE attention
+
+
+class ASPP(nn.Module):
+    """
+    Atrous Spatial Pyramid Pooling (ASPP)
+    
+    Captures multi-scale context by probing features at different dilation rates.
+    Crucial for SOTA segmentation to understand objects of different sizes.
+    
+    Updated: GELU activation to match DINOv2
+    """
+    def __init__(self, in_ch, out_ch, rates=[6, 12, 18]):
+        super().__init__()
+        self.modules_list = nn.ModuleList()
+        
+        # 1x1 conv
+        self.modules_list.append(nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.GroupNorm(8, out_ch), 
+            nn.GELU()))  # Changed from ReLU
+        
+        # 3x3 convs with dilation
+        for rate in rates:
+            self.modules_list.append(nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, padding=rate, dilation=rate, bias=False),
+                nn.GroupNorm(8, out_ch), 
+                nn.GELU()))  # Changed from ReLU
+        
+        # Global Pooling
+        self.global_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.GroupNorm(8, out_ch), 
+            nn.GELU())  # Changed from ReLU
+
+        # Project concatenated results
+        self.project = nn.Sequential(
+            nn.Conv2d(len(rates) * out_ch + 2 * out_ch, out_ch, 1, bias=False),
+            nn.GroupNorm(8, out_ch), 
+            nn.GELU(),  # Changed from ReLU
+            nn.Dropout(0.5)
+        )
+
+    def forward(self, x):
+        res = []
+        for conv in self.modules_list:
+            res.append(conv(x))
+        
+        pool = self.global_pool(x)
+        pool = F.interpolate(pool, size=x.shape[2:], mode='bilinear', align_corners=True)
+        res.append(pool)
+        
+        res = torch.cat(res, dim=1)
+        return self.project(res)
 
 
 class DecoderBlock(nn.Module):
     """
-    U-Net Decoder Block with skip connections
+    U-Net Decoder Block with skip connections and residual pathway
     
-    Upsamples feature map and concatenates with skip connection from encoder,
-    then applies ConvBlock.
-    
-    Args:
-        in_ch (int): Number of input channels (from previous decoder layer)
-        skip_ch (int): Number of skip connection channels (from encoder)
-        out_ch (int): Number of output channels
-        dropout_rate (float): Dropout probability (default: 0.0)
-    
-    Returns:
-        torch.Tensor: Decoded feature map
+    NEW: Added residual connection for improved gradient flow
     """
-    
     def __init__(self, in_ch, skip_ch, out_ch, dropout_rate=0.0):
         super().__init__()
         self.conv = ConvBlock(in_ch + skip_ch, out_ch, dropout_rate)
+        
+        # Residual projection: 1x1 conv if dimensions don't match
+        self.residual = nn.Conv2d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
     
     def forward(self, x, skip):
-        """
-        Args:
-            x (torch.Tensor): Input from previous decoder layer
-            skip (torch.Tensor): Skip connection from encoder
+        # Save input for residual
+        identity = self.residual(x)
         
-        Returns:
-            torch.Tensor: Decoded features
-        """
-        # Upsample to match skip connection size
-        x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
-        
-        # Concatenate with skip connection
+        # Standard decoder operations
+        x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, skip], dim=1)
-        
-        # Apply convolutions
         x = self.conv(x)
         
-        return x
+        # Add residual connection
+        identity_upsampled = F.interpolate(identity, size=x.shape[2:], mode='bilinear', align_corners=True)
+        return x + identity_upsampled
 
 
 class SegmentationHead(nn.Module):
     """
-    Segmentation + HV Map prediction head
+    Segmentation + HV Map prediction head with CoordConv
     
-    Takes decoder features and produces:
-    1. Segmentation mask (1 channel, sigmoid activation)
-    2. HV map (2 channels, tanh activation)
-    
-    Args:
-        in_ch (int): Number of input channels
-        hidden_ch (int): Number of hidden channels (default: 32)
-    
-    Returns:
-        tuple: (seg_mask, hv_map)
-            - seg_mask: (B, 1, H, W) in range [0, 1]
-            - hv_map: (B, 2, H, W) in range [-1, 1]
+    Updated for SOTA: 
+    1. Adds CoordConv (concatenates x,y coordinates to input)
+    2. Uses GroupNorm
+    3. GELU activation
     """
     
     def __init__(self, in_ch, hidden_ch=32):
         super().__init__()
         
-        # Feature refinement
+        # Input channels + 2 for the (x, y) coordinate grids
         self.refine = nn.Sequential(
-            nn.Conv2d(in_ch, hidden_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_ch),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch + 2, hidden_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, hidden_ch),
+            nn.GELU(),  # Changed from ReLU
         )
         
         # Output head
         self.head = nn.Sequential(
             nn.Conv2d(hidden_ch, hidden_ch, 3, padding=1),
-            nn.BatchNorm2d(hidden_ch),
-            nn.ReLU(inplace=True),
+            nn.GroupNorm(8, hidden_ch),
+            nn.GELU(),  # Changed from ReLU
             nn.Conv2d(hidden_ch, 3, 1)  # 1 for seg + 2 for HV
         )
     
@@ -132,10 +195,24 @@ class SegmentationHead(nn.Module):
         """
         Args:
             x (torch.Tensor): Decoder features (B, in_ch, H, W)
-        
-        Returns:
-            tuple: (seg_mask, hv_map)
         """
+        # --- FIXED COORDCONV LOGIC ---
+        B, _, H, W = x.shape
+        
+        # Create X-coordinate grid (repeat H times along height dim)
+        xx_channel = torch.arange(W, device=x.device).view(1, 1, 1, W).repeat(B, 1, H, 1).float() / (W - 1)
+        
+        # Create Y-coordinate grid (repeat W times along width dim)
+        yy_channel = torch.arange(H, device=x.device).view(1, 1, H, 1).repeat(B, 1, 1, W).float() / (H - 1)
+        
+        # Normalize to [-1, 1]
+        xx_channel = xx_channel * 2 - 1
+        yy_channel = yy_channel * 2 - 1
+        
+        # Concatenate coordinates to input
+        x = torch.cat([x, xx_channel, yy_channel], dim=1)
+        # -------------------------------------
+
         x = self.refine(x)
         x = self.head(x)
         
@@ -146,21 +223,30 @@ class SegmentationHead(nn.Module):
         return seg_out, hv_out
 
 
+class AuxiliaryHead(nn.Module):
+    """
+    Auxiliary head for deep supervision - NEW ADDITION
+    
+    Simple 1x1 convolution for auxiliary segmentation outputs
+    during training to improve gradient flow to earlier layers.
+    """
+    def __init__(self, in_ch):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch // 2, 3, padding=1, bias=False),
+            nn.GroupNorm(8, in_ch // 2),
+            nn.GELU(),
+            nn.Conv2d(in_ch // 2, 1, 1)
+        )
+    
+    def forward(self, x):
+        return torch.sigmoid(self.head(x))
+
+
 class ProjectionLayer(nn.Module):
     """
     1x1 Convolution for channel dimension projection
-    
-    Used to project encoder features to decoder channel dimensions
-    for skip connections.
-    
-    Args:
-        in_ch (int): Number of input channels
-        out_ch (int): Number of output channels
-    
-    Returns:
-        torch.Tensor: Projected features
     """
-    
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.proj = nn.Conv2d(in_ch, out_ch, 1)
@@ -173,50 +259,23 @@ class FusionLayer(nn.Module):
     """
     Feature fusion layer for multi-modal inputs
     
-    Concatenates features from multiple modalities and fuses them
-    with 1x1 convolution followed by BatchNorm and ReLU.
-    
-    Used in dual-encoder architectures to combine H&E and MIF features.
-    
-    Args:
-        in_ch (int): Total input channels (sum of all modalities)
-        out_ch (int): Number of output channels
-    
-    Returns:
-        torch.Tensor: Fused features
+    Updated: GELU activation
     """
-    
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.fusion = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.GroupNorm(8, out_ch),
+            nn.GELU()  # Changed from ReLU
         )
     
     def forward(self, *features):
-        """
-        Args:
-            *features: Variable number of feature tensors to fuse
-        
-        Returns:
-            torch.Tensor: Fused features
-        """
         x = torch.cat(features, dim=1)
         return self.fusion(x)
 
 
 # Utility function to get decoder dimensions based on model size
 def get_decoder_dims(model_size):
-    """
-    Get decoder channel dimensions for a given model size
-    
-    Args:
-        model_size (str): 'small', 'base', 'large', or 'giant'
-    
-    Returns:
-        list: Decoder channel dimensions [d1, d2, d3, d4]
-    """
     decoder_configs = {
         'small': [384, 256, 128, 64],
         'base':  [768, 384, 192, 96],

@@ -102,16 +102,37 @@ RUN pip install --no-cache-dir \
     click \
     rich
 
-# ── Jupyter ───────────────────────────────────────────────────────────────────
+# ── Jupyter (unpinned to avoid conflicts) ─────────────────────────────────────
 RUN pip install --no-cache-dir \
-    jupyterlab==4.1.0 \
-    notebook==7.1.0 \
-    ipython==8.21.0 \
-    ipywidgets==8.1.2 \
-    nbconvert==7.14.2
+    jupyterlab \
+    notebook \
+    ipython \
+    ipywidgets \
+    nbconvert
 
 # ── Install vitaminp from PyPI ────────────────────────────────────────────────
 RUN pip install --no-cache-dir vitaminp
+
+# ── Download pretrained weights from HuggingFace ─────────────────────────────
+# Weights are baked into the image — no download needed at runtime
+RUN python3 -c "\
+from huggingface_hub import hf_hub_download; \
+import os; \
+os.makedirs('/workspace/checkpoints', exist_ok=True); \
+hf_hub_download(repo_id='yasinmdanderson/vitaminp-weights', filename='vitamin_p_dual.pth', local_dir='/workspace/checkpoints'); \
+hf_hub_download(repo_id='yasinmdanderson/vitaminp-weights', filename='vitamin_p_flex.pth', local_dir='/workspace/checkpoints'); \
+print('✅ Weights downloaded successfully') \
+"
+
+# Also copy weights to cache so vitaminp.load_model() finds them instantly
+RUN python3 -c "\
+import os, shutil; \
+cache = os.path.expanduser('~/.cache/vitaminp'); \
+os.makedirs(cache, exist_ok=True); \
+shutil.copy('/workspace/checkpoints/vitamin_p_dual.pth', cache); \
+shutil.copy('/workspace/checkpoints/vitamin_p_flex.pth', cache); \
+print('✅ Weights cached for load_model()') \
+"
 
 # ── Directory structure ───────────────────────────────────────────────────────
 RUN mkdir -p \

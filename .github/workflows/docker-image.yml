@@ -1,0 +1,84 @@
+name: Build & Push Docker Image
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      # Rebuild only when these files change — saves CI time
+      - "Dockerfile"
+      - "requirements.txt"
+      - "setup.py"
+      - "vitaminp/**"
+      - "scripts/**"
+      - "configs/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "Dockerfile"
+      - "requirements.txt"
+      - "setup.py"
+      - "vitaminp/**"
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/vitaminp   # e.g. ghcr.io/yasinmdanderson/vitaminp
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write       # needed to push to ghcr.io
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Docker Buildx (enables layer caching) ──────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 3. Log in to GitHub Container Registry ───────────────────────────────
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}    # auto-provided, no setup needed
+
+      # ── 4. Extract metadata (tags + labels) ──────────────────────────────────
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag with branch name (e.g. main)
+            type=ref,event=branch
+            # Tag with short git SHA (e.g. sha-a1b2c3d)
+            type=sha,prefix=sha-,format=short
+            # Tag as 'latest' on main branch only
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ── 5. Build and push ─────────────────────────────────────────────────────
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}   # push on merge, not on PR
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers between runs to speed up builds (~50% faster)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 6. Print image digest ─────────────────────────────────────────────────
+      - name: Print image digest
+        run: echo "Image pushed with digest ${{ steps.build-and-push.outputs.digest }}"

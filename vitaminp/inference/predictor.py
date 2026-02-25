@@ -347,8 +347,10 @@ class WSIPredictor:
                 
                 # 2. FAST PRE-NORM (CPU)
                 # Convert to float32 [0,1] immediately to save copies later
-                if tile_he.max() > 1.0:
+                if tile_he.dtype == np.uint8:
                     tile_he = tile_he.astype(np.float32) / 255.0
+                elif tile_he.dtype != np.float32:
+                    tile_he = tile_he.astype(np.float32)
                 
                 tile_mif = None
                 if self.is_dual_model:
@@ -399,31 +401,70 @@ class WSIPredictor:
             return all_results
 
     def _process_batch_buffer(self, batch_he, batch_mif, batch_meta, branch_list, constrained_branches, accumulator, mag, mpp, thresh, min_area, scale):
-            """Internal helper to execute one batch on GPU and unpack results."""
+            """Internal helper — executes one batch on GPU and unpacks results.
             
-            # 1. Prepare Tensors (Stacking is fast)
-            tensor_he = torch.from_numpy(np.stack(batch_he)).permute(0, 3, 1, 2).contiguous().to(self.device)
+            FIX: Dual now mirrors Flex exactly:
+              1. prepare_he_input() is applied to each H&E tile  (was missing for Dual)
+              2. percentile_normalize() is applied PER-TILE, not per-batch
+                 (batch-level normalisation caused cross-tile contamination → seam lines)
+            """
+            from vitaminp import prepare_he_input
+
+            # ── 1. Per-tile prepare + normalize (identical to Flex _predict_tile) ──
+            #
+            # Flex path (_predict_tile, is_mif=False):
+            #   tile_tensor = prepare_he_input(tile_tensor)           # stain aug / colour norm
+            #   tile_tensor = preprocessor.percentile_normalize(tile_tensor)  # per-tile stats
+            #
+            # Previously Dual skipped prepare_he_input and called percentile_normalize
+            # on the whole batch tensor, mixing statistics across tiles → seam lines.
+            #
+            # Solution: normalise each tile independently on GPU before stacking.
+
+            prepared_he_list = []
+            for tile_np in batch_he:
+                t = torch.from_numpy(tile_np).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+                t = prepare_he_input(t)                          # ← FIX 1: was missing
+                t = self.preprocessor.percentile_normalize(t)   # ← FIX 2: per-tile, not per-batch
+                prepared_he_list.append(t)
+            tensor_he = torch.cat(prepared_he_list, dim=0)      # (B, C, H, W)
+
             tensor_mif = None
             if self.is_dual_model and batch_mif:
-                tensor_mif = torch.from_numpy(np.stack(batch_mif)).permute(0, 3, 1, 2).contiguous().to(self.device)
+                prepared_mif_list = []
+                for tile_np in batch_mif:
+                    t = torch.from_numpy(tile_np).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+                    t = self.preprocessor.percentile_normalize(t)  # per-tile MIF norm (matches Flex)
+                    prepared_mif_list.append(t)
+                tensor_mif = torch.cat(prepared_mif_list, dim=0)
 
-            # 2. Inference (Optimized Forward Pass)
+            # ── 2. Inference (single batched forward pass) ────────────────────
             with torch.no_grad():
-                outputs = self._forward_pass_batch(tensor_he, tensor_mif)
+                if tensor_mif is not None:
+                    if self.mixed_precision:
+                        with torch.cuda.amp.autocast():
+                            outputs = self.model(tensor_he, tensor_mif)
+                    else:
+                        outputs = self.model(tensor_he, tensor_mif)
+                else:
+                    if self.mixed_precision:
+                        with torch.cuda.amp.autocast():
+                            outputs = self.model(tensor_he)
+                    else:
+                        outputs = self.model(tensor_he)
 
-            # 3. Unpack Results to CPU
+            # ── 3. Unpack Results to CPU ──────────────────────────────────────
             cpu_outputs = {}
             sorted_branches = sorted(branch_list, key=lambda b: (0 if 'nuclei' in b else 1))
 
             for b in sorted_branches:
-                actual_b = b.replace('he_', 'mif_') if (self.is_dual_model and 'he_' in b and tensor_mif is not None) else b
-                cfg = self.SUPPORTED_BRANCHES[actual_b]
+                cfg = self.SUPPORTED_BRANCHES[b]
                 cpu_outputs[b] = {
                     'seg': outputs[cfg['seg_key']][:, 0].cpu().numpy(),
                     'hv': outputs[cfg['hv_key']].cpu().numpy()
                 }
 
-            # 4. Post-Process Each Tile in the Batch
+            # ── 4. Post-Process Each Tile in the Batch ────────────────────────
             for i in range(len(batch_meta)):
                 meta = batch_meta[i]
                 nuclei_inst_maps = {} 
@@ -456,27 +497,28 @@ class WSIPredictor:
                             min_area_um=min_area, use_gpu=False
                         )
                         nuclei_inst_maps[b] = inst_map
-
+                        
     def _forward_pass_batch(self, tensor_he, tensor_mif=None):
-            """OPTIMIZED Forward Pass: Replaces slow quantile with fast normalization"""
-            
-            # FAST NORMALIZATION: Assumes input is float32 [0,1]
-            from vitaminp import prepare_he_input 
-            tensor_he = prepare_he_input(tensor_he) 
-            
-            if tensor_mif is not None:
-                if self.mixed_precision:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(tensor_he, tensor_mif)
-                else:
+        """Match direct inference script normalization exactly"""
+        # Use preprocessor.percentile_normalize for BOTH — same as your working script
+        tensor_he = self.preprocessor.percentile_normalize(tensor_he)
+        
+        if tensor_mif is not None:
+            tensor_mif = self.preprocessor.percentile_normalize(tensor_mif)
+        
+        if tensor_mif is not None:
+            if self.mixed_precision:
+                with torch.cuda.amp.autocast():
                     outputs = self.model(tensor_he, tensor_mif)
             else:
-                if self.mixed_precision:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(tensor_he)
-                else:
+                outputs = self.model(tensor_he, tensor_mif)
+        else:
+            if self.mixed_precision:
+                with torch.cuda.amp.autocast():
                     outputs = self.model(tensor_he)
-            return outputs
+            else:
+                outputs = self.model(tensor_he)
+        return outputs
     # =========================================================================
     # NEW: Shared finalisation (overlap cleaning + export) extracted so both
     #      single-branch and multi-branch paths can reuse it.

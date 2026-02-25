@@ -519,10 +519,14 @@ class TileProcessor:
             ly_min = np.min(contour_local[:, 1])
             ly_max = np.max(contour_local[:, 1])
 
-            touches_top    = (ly_min <= 2)
-            touches_bottom = (ly_max >= self.tile_size - 3)
-            touches_left   = (lx_min <= 2)
-            touches_right  = (lx_max >= self.tile_size - 3)
+            # Scale tile size and margins to WSI global space
+            scaled_tile_size = self.tile_size / scale_factor
+            scaled_margin = 3 / scale_factor
+
+            touches_top    = (ly_min <= scaled_margin)
+            touches_bottom = (ly_max >= scaled_tile_size - scaled_margin)
+            touches_left   = (lx_min <= scaled_margin)
+            touches_right  = (lx_max >= scaled_tile_size - scaled_margin)
 
             grid_info = None
             if grid_position is not None:
@@ -557,45 +561,53 @@ class TileProcessor:
         cells_global = self._keep_instances_in_core_global(
             cells_global,
             position=position,
-            grid_position=grid_position,   # ✅ IMPORTANT
+            grid_position=grid_position,   
             core_margin=self.overlap // 2,
+            scale_factor=scale_factor,    # <--- ADDED SCALE FACTOR
         )
 
         return cells_global
-    def _keep_instances_in_core_global(self, cells_global, position, grid_position=None, core_margin=None):
-        """
-        Keep only instances whose GLOBAL centroid is inside the tile's CORE region.
-        BUT: relax the margin on outermost tiles (global slide boundary), so border
-        objects are not lost.
-        """
-        y1, x1, y2, x2 = position
+    
 
-        if core_margin is None:
-            core_margin = self.overlap // 2
+    def _keep_instances_in_core_global(self, cells_global, position, grid_position=None, core_margin=None, scale_factor=1.0):
+            """
+            Keep only instances whose GLOBAL centroid is inside the tile's CORE region.
+            BUT: relax the margin on outermost tiles (global slide boundary), so border
+            objects are not lost. Adjusted for scale_factor.
+            """
+            y1, x1, y2, x2 = position
 
-        # default margins on all sides
-        left_m = right_m = top_m = bottom_m = core_margin
+            if core_margin is None:
+                core_margin = self.overlap // 2
 
-        # If this tile is on the global outer boundary, don't exclude that side
-        if grid_position is not None:
-            tile_row, tile_col, n_tiles_h, n_tiles_w = grid_position
-            if tile_row == 0:              top_m = 0
-            if tile_row == n_tiles_h - 1:  bottom_m = 0
-            if tile_col == 0:              left_m = 0
-            if tile_col == n_tiles_w - 1:  right_m = 0
+            # Scale the margins and tile size down to match the global WSI space
+            global_margin = core_margin / scale_factor
+            global_tile_size = self.tile_size / scale_factor
 
-        # Core bounds in GLOBAL coords
-        x_min = x1 + left_m
-        x_max = x1 + self.tile_size - right_m
-        y_min = y1 + top_m
-        y_max = y1 + self.tile_size - bottom_m
+            # default margins on all sides
+            left_m = right_m = top_m = bottom_m = global_margin
 
-        kept = []
-        for c in cells_global:
-            cx, cy = c["centroid"]  # [x, y]
-            if (x_min <= cx < x_max) and (y_min <= cy < y_max):
-                kept.append(c)
-        return kept
+            # If this tile is on the global outer boundary, don't exclude that side
+            if grid_position is not None:
+                tile_row, tile_col, n_tiles_h, n_tiles_w = grid_position
+                if tile_row == 0:              top_m = 0
+                if tile_row == n_tiles_h - 1:  bottom_m = 0
+                if tile_col == 0:              left_m = 0
+                if tile_col == n_tiles_w - 1:  right_m = 0
+
+            # Core bounds in GLOBAL coords
+            x_min = x1 + left_m
+            x_max = x1 + global_tile_size - right_m
+            y_min = y1 + top_m
+            y_max = y1 + global_tile_size - bottom_m
+
+            kept = []
+            for c in cells_global:
+                cx, cy = c["centroid"]  # [x, y]
+                if (x_min <= cx < x_max) and (y_min <= cy < y_max):
+                    kept.append(c)
+            return kept
+
 
     def _is_edge_cell(self, bbox, patch_size, margin=32):
         """Check if a cell is near the edge of a tile

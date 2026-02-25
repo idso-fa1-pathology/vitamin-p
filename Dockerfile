@@ -1,5 +1,10 @@
 FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
+# ── Proxy (MD Anderson network) ───────────────────────────────────────────────
+# ENV http_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV https_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV HTTP_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV HTTPS_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
 
 # ── Environment ───────────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive

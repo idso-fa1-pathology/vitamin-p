@@ -1,19 +1,20 @@
-FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu20.04
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
-# Set web proxy for MD Anderson network
-ENV http_proxy=http://1mcwebproxy01.mdanderson.edu:3128
-ENV https_proxy=http://1mcwebproxy01.mdanderson.edu:3128
-ENV HTTP_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
-ENV HTTPS_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
+# ── Proxy (MD Anderson network) ───────────────────────────────────────────────
+# ENV http_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV https_proxy=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV HTTP_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
+# ENV HTTPS_PROXY=http://1mcwebproxy01.mdanderson.edu:3128
 
-# Set environment variables
+# ── Environment ───────────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HDF5_USE_FILE_LOCKING=FALSE
 ENV NUMBA_CACHE_DIR=/tmp
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/workspace
 
-# Install system libraries
+# ── System libraries ──────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1-mesa-glx \
@@ -24,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    libopenslide-dev \
+    openslide-tools \
     sudo \
     curl \
     wget \
@@ -31,119 +34,104 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     vim \
     ca-certificates \
-    python3-openslide \
     python3 \
     python3-pip \
     python3-dev \
+    python3-openslide \
     && rm -rf /var/lib/apt/lists/*
 
-# Create symbolic links for python commands
 RUN ln -sf /usr/bin/python3 /usr/bin/python
+RUN python3 -m pip install --upgrade pip setuptools wheel
 
-# Upgrade pip
-RUN python3 -m pip install --upgrade pip
-
-# Install base Python packages
-RUN pip install --no-cache-dir \
-    gpustat==0.6.0 \
-    setuptools==61.2.0 \
-    pytz==2021.1 \
-    joblib==1.2.0 \
-    tqdm==4.64.0 \
-    docopt==0.6.2
-
-# Install Jupyter and notebook tools
-RUN pip install --no-cache-dir \
-    ipython==8.10.0 \
-    jupyterlab==3.6.1 \
-    notebook==6.4.11 \
-    traitlets==5.9.0 \
-    chardet==5.0.0 \
-    nbconvert==7.8.0
-
-# Install image processing libraries (adjusted versions for Python 3.8)
-RUN pip install --no-cache-dir \
-    openslide-python==1.3.1 \
-    Pillow==10.0.0 \
-    opencv-python==4.8.0.74 \
-    scikit-image==0.21.0 \
-    tifffile==2023.7.10 \
-    imagecodecs==2023.3.16
-
-# Install data science packages (adjusted versions for Python 3.8)
-RUN pip install --no-cache-dir \
-    numpy==1.24.4 \
-    pandas==2.0.3 \
-    matplotlib==3.7.2 \
-    seaborn==0.13.0 \
-    scikit-learn==1.3.2 \
-    geopandas==0.13.2 \
-    scipy==1.10.1
-
-# Install PyTorch with CUDA 12.1 support
+# ── PyTorch (CUDA 12.1) ───────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
     torchvision==0.16.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# 🔥 Install CuPy for GPU-accelerated post-processing (CUDA 12.1)
+# ── Core scientific stack ─────────────────────────────────────────────────────
+# Pinned to <2 to avoid OpenCV/NumPy 2.x incompatibility
+RUN pip install --no-cache-dir \
+    "numpy<2" \
+    pandas==2.1.4 \
+    scipy==1.11.4 \
+    scikit-learn==1.3.2 \
+    scikit-image==0.22.0 \
+    matplotlib==3.8.2 \
+    seaborn==0.13.0
+
+# ── Image processing ──────────────────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    Pillow==10.2.0 \
+    opencv-python==4.9.0.80 \
+    tifffile==2024.1.30 \
+    imagecodecs==2024.1.1 \
+    openslide-python==1.3.1
+
+# ── Geospatial / WSI ──────────────────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    geopandas==0.14.3 \
+    shapely==2.0.3 \
+    fiona==1.9.5
+
+# ── Parquet / Arrow (for save_parquet=True) ───────────────────────────────────
+RUN pip install --no-cache-dir \
+    pyarrow==15.0.0 \
+    fastparquet==2024.2.0
+
+# ── Deep learning extras ──────────────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    timm==0.9.16 \
+    albumentations==1.3.1 \
+    wandb \
+    tensorboard==2.15.1 \
+    huggingface-hub==0.20.3
+
+# ── GPU accelerated post-processing ──────────────────────────────────────────
 RUN pip install --no-cache-dir cupy-cuda12x
 
+# ── Misc utilities ────────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
-    wandb \
-    timm
+    gpustat \
+    tqdm==4.66.1 \
+    PyYAML==6.0.1 \
+    pydantic==2.5.3 \
+    "zarr<3" \
+    joblib==1.3.2 \
+    natsort \
+    click \
+    rich
 
-# Install additional ML/DL packages
+# ── Jupyter ───────────────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
-    clip-anytorch==2.6.0 \
-    tensorboard==2.14.0 \
-    albumentations \
-    PyYAML \
-    "zarr<3"
+    jupyterlab==4.1.0 \
+    notebook==7.1.0 \
+    ipython==8.21.0 \
+    ipywidgets==8.1.2 \
+    nbconvert==7.14.2
 
-# Configure folder permissions
-RUN mkdir -p /.dgl /.local /.cache /tmp && \
-    chmod -R 777 /.dgl /.local /.cache /tmp
+# ── Install vitaminp from PyPI ────────────────────────────────────────────────
+RUN pip install --no-cache-dir vitaminp
 
-# Create Data folder
-WORKDIR /Data
-RUN chmod -R 777 /Data
+# ── Directory structure ───────────────────────────────────────────────────────
+RUN mkdir -p \
+    /.dgl /.local /.cache /tmp \
+    /workspace/checkpoints \
+    /workspace/cache \
+    /workspace/output \
+    /workspace/results \
+    /workspace/test_images \
+    /Data && \
+    chmod -R 777 /.dgl /.local /.cache /tmp /workspace /Data
 
-# Create workspace and set permissions
-WORKDIR /workspace
-RUN chmod -R 777 /workspace
-
-# Copy vitaminp package (main package with all modules)
-COPY vitaminp/ /workspace/vitaminp/
-
-# Copy scripts (training and inference scripts)
-COPY scripts/ /workspace/scripts/
-
-# Copy dataset folder if needed
-COPY dataset/ /workspace/dataset/
-
-# Copy configuration files
-COPY configs/ /workspace/configs/
-
-# Copy additional files
-COPY setup.py /workspace/
+# ── Copy source (for development use; pip install handles production) ─────────
+COPY vitaminp/   /workspace/vitaminp/
+COPY scripts/    /workspace/scripts/
+COPY configs/    /workspace/configs/
+COPY setup.py    /workspace/
 COPY requirements.txt /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
+COPY README.md   /workspace/
+COPY LICENSE     /workspace/
 
-# Create necessary directories
-RUN mkdir -p /workspace/checkpoints \
-             /workspace/cache \
-             /workspace/output \
-             /workspace/inference_results \
-             /workspace/results \
-             /workspace/test_images && \
-    chmod -R 777 /workspace
-
-# Set Python path
-ENV PYTHONPATH=/workspace
-
-# Default working directory
 WORKDIR /workspace
-
 CMD ["/bin/bash"]

@@ -77,9 +77,6 @@ splits:
     - ovarian
     - skin
     - pancreasV1
-    # --- Xenium ---
-    - prostate
-    - lungV1
     
     # --- CRC (Primary Bulk) ---
     - CRC01
@@ -117,46 +114,7 @@ splits:
     - CRC38
     - CRC39
     - CRC40
-    # --- Pannuke ---  
-    - pannuke_test
 
-    # --- TissueNet ---
-    - tissuenet_test
-    
-    # --- Lizard (10% Split) ---
-    - lizard_test
-
-    # --- TNBC (Test Set) ---
-    - tnbc_test   
-
-    # --- MoNuSeg (Test Set) ---
-    - monuseg_test
-
-    # --- NuInsSeg (Test Set) ---
-    - nuinsseg_test
-
-    # --- CryoNuSeg (Test Set) ---
-    - cryonuseg_test
-
-    # --- BC (Validation Set) ---
-    - bc_test
-
-    # --- ConSep (Test Set) ---
-    - consep_test
-
-    # --- MoNuSAC (Test Set) ---
-    - monusac_test
-    
-    # --- Kumar (Test Set) ---
-    - kumar_test
-
-    # --- CPM-17 (Test Set) ---
-    - cpm17_test
-
-    # --- CRC (Held-out for reporting) ---
-    - CRC03
-    - CRC11
-    - CRC37
   # --------------------------------------------------------------------------
   # VALIDATION SET (Model Selection / Tuning)
   # --------------------------------------------------------------------------
@@ -197,7 +155,9 @@ splits:
     # --- CPM-17 (Validation Set) ---
     - cpm17_val
 
-
+    # --- Xenium ---
+    - prostate
+    - lungV1
     
     # --- CRC (Held-out subset) ---
     - CRC09
@@ -381,7 +341,7 @@ splits:
 dataloader:
   batch_size: 4
   num_workers: 16
-  pin_memory: true
+  pin_memory: True
   persistent_workers: true
   prefetch_factor: 2
   shuffle_train: true
@@ -396,44 +356,47 @@ processing:
   he_max_value: 255.0
   mif_max_value: 65535.0
 
+
 # ============================================================================
-# 5. AUGMENTATION SETTINGS - AGGRESSIVE (Multi-Dataset Optimized)
+# 5. AUGMENTATION SETTINGS - MAGNIFICATION AGNOSTIC
 # ============================================================================
 augmentation:
-  train_augment: true
+  train_augment: false
   val_augment: false
   test_augment: false
-  augment_prob: 1.0  # Always apply augmentation during training
+  augment_prob: 0.0
   
   geometric:
-    flip_prob: 0.7              # Increased - histology is rotation-invariant
-    rotation_prob: 0.6          # Increased - more diverse orientations
+    flip_prob: 0.5
+    rotation_prob: 0.5
     rotation_angles: [90, 180, 270]
-    scale_prob: 0.8             # 2.7x increase - critical for multi-magnification
-    scale_range: [0.5, 2.0]     # Wider range for scale invariance
+    scale_prob: 0.0              # Disabled - no multi-magnification needed
+    scale_range: [1.0, 1.0]
+    random_resize_prob: 0.0      # Disabled - single dataset, consistent mag
+    resize_range: [1.0, 1.0]
   
   photometric:
-    brightness_prob: 0.5        # 2.5x increase - scanner variations
-    brightness_factor: 0.25     # 1.67x stronger effect
-    contrast_prob: 0.4          # 4x increase - staining intensity variations
-    contrast_factor: 0.25       # 1.67x stronger effect
+    brightness_prob: 0.3
+    brightness_factor: 0.15
+    contrast_prob: 0.3
+    contrast_factor: 0.15
   
   stain:
-    stain_prob: 0.5             # 5x increase - CRITICAL for CRC+Xenium+PanNuke
-    hue_shift_range: [-0.04, 0.04]      # 2.67x stronger - H&E stain variations
-    saturation_range: [0.7, 1.4]      # Much wider - different staining protocols
-    value_range: [0.7, 1.3]
+    stain_prob: 0.3              # Mild - PanNuke is already consistent staining
+    hue_shift_range: [-0.02, 0.02]
+    saturation_range: [0.85, 1.15]
+    value_range: [0.85, 1.15]
+    
   noise_blur:
-    blur_prob: 0.4              # Keep - simulates focus variations
-    blur_sigma_range: [0.1, 1.0]        # Slightly stronger blur
-    noise_prob: 0.35            # Slightly increased - sensor noise
-    noise_he_std_range: [0.005, 0.03]   # Slightly stronger
-    noise_mif_std_range: [0.002, 0.015] # Slightly stronger
+    blur_prob: 0.2
+    blur_sigma_range: [0.1, 0.5]
+    noise_prob: 0.2
+    noise_he_std_range: [0.005, 0.015]
+    noise_mif_std_range: [0.002, 0.008]
   
   cutout:
-    cutout_prob: 0.35           # Slightly increased - occlusion robustness
-    cutout_size_range: [10, 60] # Larger cutouts for better regularization
-
+    cutout_prob: 0.2
+    cutout_size_range: [10, 40]
 # ============================================================================
 # 6. HV MAP GENERATION
 # ============================================================================
@@ -474,3 +437,4 @@ debug:
   max_samples: null
   print_data_stats: true
   validate_data: true
+

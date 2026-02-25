@@ -8,7 +8,11 @@
 # ============================================================================
 data:
   zarr_bases:
-    lizard: "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/lizard/zarr_data"
+    cpm15 : "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/cpm15"
+    he_dsb2018 : "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/dsb2018"
+    fluorescence_dsb2018 : "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/dsb2018"
+    panoptils : "/rsrch9/home/plm/idso_fa1_pathology/TIER2/yasin-vitaminp/panoptils"
+
   cache_dir: "./cache"
   cache_filename: "multimodal_dataset_cache_fold1.pkl"
 
@@ -23,8 +27,11 @@ splits:
     # --- PanNuke (Folds 1 & 2) ---
 
     # --- Lizard (85% Split) ---
-    - lizard_train
-
+    - he_dsb2018
+    - fluorescence_dsb2018
+    # - panoptils_full
+    - cpm15_full
+  
   # --------------------------------------------------------------------------
   # VALIDATION SET (Model Selection / Tuning)
   # --------------------------------------------------------------------------
@@ -32,7 +39,11 @@ splits:
     # --- PanNuke (Fold 3) ---
     
     # --- Lizard (5% Split) ---
-    - lizard_val
+
+    - he_dsb2018
+    - fluorescence_dsb2018
+    # - panoptils_full
+    - cpm15_full
 
 
   # --------------------------------------------------------------------------
@@ -42,7 +53,10 @@ splits:
     # --- Pannuke ---  
 
     # --- Lizard (10% Split) ---
-    - lizard_test
+    - he_dsb2018
+    - fluorescence_dsb2018
+    - panoptils_full
+    - cpm15_full
 
   # --------------------------------------------------------------------------
   # GLOBAL SETTINGS
@@ -56,108 +70,14 @@ splits:
   all_samples:
     
     # Lizard
-    - lizard_train
-    - lizard_val
-    - lizard_test
-    
-    # MoNuSeg
-    - monuseg_train
-    - monuseg_val
-    - monuseg_test
-    
-    # TNBC
-    - tnbc_train
-    - tnbc_val
-    - tnbc_test
-    
-    # NuInsSeg
-    - nuinsseg_train
-    - nuinsseg_val
-    - nuinsseg_test
-    
-    # CryoNuSeg
-    - cryonuseg_train
-    - cryonuseg_val
-    - cryonuseg_test
-    
-    # BC
-    - bc_train
-    - bc_val
-    - bc_test
+    - dsb2018_full
+    # - panoptils_full
+    - cpm15_full
 
-    # ConSep 
-    - consep_train
-    - consep_val
-    - consep_test
+    - fluorescence_dsb2018
+    - he_dsb2018
 
-    # MoNuSAC
-    - monusac_train
-    - monusac_val
-    - monusac_test
 
-    # Kumar
-    - kumar_train
-    - kumar_val
-    - kumar_test
-
-    # CPM-17
-    - cpm17_train
-    - cpm17_val
-    - cpm17_test
-
-    # Xenium
-    - breast
-    - cervical
-    - lung
-    - lungV1
-    - lymph_node
-    - ovarian
-    - pancreasV1
-    - prostate
-    - skin
-    
-    # CRC
-    - CRC01
-    - CRC02
-    - CRC03
-    - CRC04
-    - CRC05
-    - CRC06
-    - CRC07
-    - CRC08
-    - CRC09
-    - CRC10
-    - CRC11
-    - CRC12
-    - CRC13
-    - CRC14
-    - CRC15
-    - CRC16
-    - CRC17
-    - CRC18
-    - CRC19
-    - CRC20
-    - CRC21
-    - CRC22
-    - CRC23
-    - CRC24
-    - CRC25
-    - CRC26
-    - CRC27
-    - CRC28
-    - CRC29
-    - CRC30
-    - CRC31
-    - CRC32
-    - CRC33_01
-    - CRC33_02
-    - CRC34
-    - CRC35
-    - CRC36
-    - CRC37
-    - CRC38
-    - CRC39
-    - CRC40
 
 # ============================================================================
 # 3. DATALOADER SETTINGS

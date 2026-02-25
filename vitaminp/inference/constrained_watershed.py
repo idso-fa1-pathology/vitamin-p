@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Nuclei-constrained watershed for cell segmentation.
+"""HV-Constrained watershed for cell segmentation.
 
-Uses detected nuclei as seeds and the model's cell prediction as the
-boundary mask, guaranteeing a strict 1-to-1 nucleus→cell relationship.
+Uses detected nuclei as seeds, model HV maps as boundaries, 
+and recovers orphan cells without nuclei to guarantee accurate, 
+1-to-1 or independent cell geometries.
 """
 
 import numpy as np
@@ -12,53 +13,85 @@ from scipy.ndimage import distance_transform_edt
 from skimage.segmentation import watershed
 
 
-def apply_nuclei_constrained_watershed(nuclei_labels, cell_seg_map, cell_threshold=0.5):
-    """Refine cell boundaries using nuclei as watershed seeds.
+def apply_hv_constrained_watershed(nuclei_labels, cell_prob_map, cell_h_map, cell_v_map, prob_threshold=0.5, min_orphan_area=30):
+    """Forces 1 cell per nucleus, uses HV edges as walls, and rescues orphan cells.
 
     Args:
         nuclei_labels: Instance-labeled nuclei map (H, W) with unique int IDs per nucleus.
-                       Background = 0.  This is the inst_map output from process_model_outputs
-                       run on the nuclei branch.
-        cell_seg_map:  Raw cell segmentation probability map (H, W) in [0, 1].
-                       This is tile_pred['seg'] from the cell branch — do NOT threshold it
-                       before passing it in; the function handles that internally.
-        cell_threshold: Probability threshold for binarizing cell_seg_map (default 0.5).
+        cell_prob_map: Raw cell segmentation probability map (H, W) in [0, 1].
+        cell_h_map: Horizontal distance map from the model (H, W).
+        cell_v_map: Vertical distance map from the model (H, W).
+        prob_threshold: Probability threshold for binarizing cell_prob_map.
+        min_orphan_area: Minimum area in pixels to consider an orphan blob as a valid cell.
 
     Returns:
         constrained_cells: Label map (H, W) where each pixel belongs to exactly one cell
-                           (or 0 for background).  Labels match the input nuclei IDs, so
-                           label N in the output corresponds to nucleus N in nuclei_labels.
+                           (or 0 for background).
     """
-    # --- Markers: the nuclei instance map is used directly as seeds ---
-    markers = nuclei_labels.astype(np.int32)
+    cell_binary = cell_prob_map > prob_threshold
+    nuclei_binary = nuclei_labels > 0
+    
+    # Convert to uint8 for OpenCV morphological operations
+    combined_mask = np.logical_or(cell_binary, nuclei_binary).astype(np.uint8)
+    
+    # Fill in small indents and smooth boundaries before watershed
+    kernel_global = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_global)
+    
+    # Convert back to boolean for downstream distance transforms and masks
+    combined_mask = combined_mask > 0
+    
+    # ---- 1. ORPHAN RECOVERY (Find cells without nuclei) ----
+    markers = nuclei_labels.astype(np.int32).copy()
+    max_marker_id = np.max(markers) if np.max(markers) > 0 else 0
+    
+    # Dilate nuclei slightly to prevent the fringes of nucleated cells from being flagged as orphans
+    dilated_nuclei = cv2.dilate(nuclei_binary.astype(np.uint8), np.ones((7,7), np.uint8), iterations=2)
+    orphan_mask = (cell_binary.astype(np.uint8) > 0) & (dilated_nuclei == 0)
+    
+    # Find independent blobs in the orphan mask
+    num_labels, orphan_labels = cv2.connectedComponents(orphan_mask.astype(np.uint8))
+    for i in range(1, num_labels):
+        mask_i = orphan_labels == i
+        if np.sum(mask_i) > min_orphan_area:  
+            max_marker_id += 1
+            # Find the thickest center point of this orphan cell to drop a new seed
+            dist_i = distance_transform_edt(mask_i)
+            cy, cx = np.unravel_index(np.argmax(dist_i), dist_i.shape)
+            markers[cy, cx] = max_marker_id
+    # --------------------------------------------------------
 
-    # --- Mask: union of cell prediction and nuclei binary ---
-    # OR-ing with nuclei ensures no seed ever falls outside the allowed region,
-    # even if the cell prediction slightly under-segments around that nucleus.
-    cell_binary = cell_seg_map > cell_threshold
-    nuclei_binary = markers > 0
-    combined_mask = np.logical_or(cell_binary, nuclei_binary)
-
-    # --- Energy landscape: distance from the combined mask boundary ---
-    # Pixels deep inside a cell get high distance values (low energy when negated);
-    # pixels near the edge get low distance values (high energy = watershed ridge).
+    # 2. Get HV Edges (Boundary Walls)
+    sobel_h_x = cv2.Sobel(cell_h_map, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_h_y = cv2.Sobel(cell_h_map, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_v_x = cv2.Sobel(cell_v_map, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_v_y = cv2.Sobel(cell_v_map, cv2.CV_64F, 0, 1, ksize=3)
+    
+    hv_edges = np.sqrt(sobel_h_x**2 + sobel_h_y**2 + sobel_v_x**2 + sobel_v_y**2)
+    if hv_edges.max() > 0:
+        hv_edges = hv_edges / hv_edges.max()
+        
+    # 3. Distance from background (Basins)
     dist = distance_transform_edt(combined_mask)
-
-    # --- Watershed ---
-    # -dist   → topography (inverted so basins are at cell centres)
-    # markers → seeds (one per nucleus)
-    # mask    → hard boundary; watershed never floods outside this region
-    constrained_cells = watershed(-dist, markers, mask=combined_mask)
-
+    if dist.max() > 0:
+        dist_norm = dist / dist.max()
+    else:
+        dist_norm = dist
+        
+    # 4. Model uncertainty
+    uncertainty = 1.0 - cell_prob_map
+    
+    # 5. FINAL TOPOGRAPHY
+    topography = -dist_norm + (2.0 * hv_edges) + uncertainty
+    
+    # Run watershed with the updated markers (nuclei + orphan seeds)
+    constrained_cells = watershed(topography, markers, mask=combined_mask)
+    
     return constrained_cells
 
 
 def extract_instances_from_labels(label_map, min_area=0):
-    """Extract per-instance info from a label map (same format as postprocessing output).
-
-    This produces the same dict structure that process_model_outputs returns in
-    inst_info_dict, so the rest of the pipeline (coordinate conversion, boundary
-    detection, export) needs no changes.
+    """Extract per-instance info from a label map (matches postprocessing format).
 
     Args:
         label_map: (H, W) integer label map. Background = 0.
@@ -96,14 +129,25 @@ def extract_instances_from_labels(label_map, min_area=0):
         roi_x_end   = min(label_map.shape[1], x_max + 2)
 
         roi_mask = mask[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+        
+        # Final smoothing to ensure perfect, indent-free polygons
+        kernel_roi = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        roi_mask = cv2.morphologyEx(roi_mask, cv2.MORPH_CLOSE, kernel_roi)
+
         contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
             contour = max(contours, key=cv2.contourArea)
             if len(contour) >= 3:
                 contour = contour.astype(np.float32).squeeze()          # (N, 2)
-                contour[:, 0] += roi_x_start                            # shift x back
-                contour[:, 1] += roi_y_start                            # shift y back
+                if contour.ndim == 2:
+                    contour[:, 0] += roi_x_start                        # shift x back
+                    contour[:, 1] += roi_y_start                        # shift y back
+                else:
+                    contour = np.array([
+                        [x_min, y_min], [x_max, y_min],
+                        [x_max, y_max], [x_min, y_max]
+                    ], dtype=np.float32)
             else:
                 contour = np.array([
                     [x_min, y_min], [x_max, y_min],

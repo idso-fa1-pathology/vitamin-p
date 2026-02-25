@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vitamin-p-flex-large-hv4-newestblock-lr1e4-wd1e2-mif2-hugeaug  # ← Updated name to indicate UNI pretraining
+  name: vitamin-p-dual-base-latest  # ← Updated name to indicate UNI pretraining
   namespace: yn-gpu-workload
 spec:
   backoffLimit: 0
@@ -30,11 +30,11 @@ spec:
             - "python"
             - "scripts/train.py"
             - "--model"
-            - "flex"                          # Model type: dual, syn, flex, baseline_he, baseline_mif
+            - "dual"                          # Model type: dual, syn, flex, baseline_he, baseline_mif
             - "--size"
-            - "large"                         # Model size: small, base, large, giant
+            - "base"                         # Model size: small, base, large, giant
             - "--fold"
-            - "32"                            # Fold: 1, 2, 3, 4, 5, 11, 12, etc.
+            - "2"                            # Fold: 1, 2, 3, 4, 5, 11, 12, etc.
             - "--epochs"
             - "250"
             # - "--pretrain"
@@ -69,7 +69,7 @@ spec:
               mountPath: "/rsrch9/home/plm/idso_fa1_pathology"
           resources:
             limits:
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "3"
               cpu: "60"
               memory: "700Gi"
       restartPolicy: Never

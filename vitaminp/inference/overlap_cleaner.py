@@ -246,6 +246,9 @@ class OverlapCleaner:
             if "contour" in row and row["contour"] is not None:
                 try:
                     contour = np.array(row["contour"])
+                    # [!] FIX: Prevent Shapely errors from (N, 1, 2) shaped OpenCV contours
+                    if contour.ndim == 3:
+                        contour = contour.squeeze(axis=1)
                     poly = Polygon(contour)
                 except:
                     # Fall back to bbox if contour is invalid
@@ -376,9 +379,9 @@ def _get_cell_status(bbox: np.ndarray, patch_size: int, margin: int) -> int:
     xmin, ymin = bbox[0]
     xmax, ymax = bbox[1]
     
-    # Check if in margin
-    if xmax < margin or ymin < margin or xmax > patch_size - margin or ymax > patch_size - margin:
-        return 0  # Mid
+    # [!] FIX: Check if cell is strictly inside the safe margin zone
+    if xmin >= margin and ymin >= margin and xmax <= patch_size - margin and ymax <= patch_size - margin:
+        return 0  # Mid (Safe zone)
     
     # Determine edge position
     if ymin < margin:

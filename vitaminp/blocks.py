@@ -287,3 +287,4 @@ def get_decoder_dims(model_size):
         raise ValueError(f"model_size must be one of {list(decoder_configs.keys())}")
     
     return decoder_configs[model_size]
+

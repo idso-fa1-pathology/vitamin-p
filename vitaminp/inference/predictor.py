@@ -851,49 +851,20 @@ class WSIPredictor:
             return {'seg': seg, 'hv': hv}
 
     def _clean_overlaps(self, inst_info, iou_threshold):
-        """Clean overlapping instances using Hard Drop + Iterative strategy"""
+        """Clean overlapping instances at tile boundaries (NO Hard Drop).
+
+        With the tile-core (owner-tile) filtering in TileProcessor, we should NOT
+        directionally hard-drop boundary-touching instances here (it causes losses).
+        This function now only deduplicates true overlaps.
+        """
         from shapely.geometry import Polygon, MultiPolygon
         from shapely import strtree
 
         self.logger.info(f"   🔍 Starting with {len(inst_info)} instances")
 
-        # ── PHASE 1: HARD DROP ────────────────────────────────────────────
-        self.logger.info(f"   📍 Phase 1: Hard Drop (directional boundary cleaning)")
-        surviving_cells = []
-        dropped_count = 0
-
-        for inst_id, inst_data in inst_info.items():
-            grid_info = inst_data.get('grid_info')
-            if grid_info is None:
-                surviving_cells.append((inst_id, inst_data))
-                continue
-
-            tile_row    = grid_info['tile_row']
-            tile_col    = grid_info['tile_col']
-            n_tiles_h   = grid_info['n_tiles_h']
-            n_tiles_w   = grid_info['n_tiles_w']
-
-            drop = False
-            if inst_data.get('touches_top', False)    and tile_row > 0:              drop = True
-            if inst_data.get('touches_bottom', False) and tile_row < n_tiles_h - 1:  drop = True
-            if inst_data.get('touches_left', False)   and tile_col > 0:              drop = True
-            if inst_data.get('touches_right', False)  and tile_col < n_tiles_w - 1:  drop = True
-
-            if drop:
-                dropped_count += 1
-            else:
-                surviving_cells.append((inst_id, inst_data))
-
-        self.logger.info(f"   ✓ Hard Drop removed {dropped_count}, survivors: {len(surviving_cells)}")
-
-        if len(surviving_cells) == 0:
-            return {}
-
-        # ── PHASE 2: ITERATIVE OVERLAP CLEANING ───────────────────────────
-        self.logger.info(f"   🔄 Phase 2: Iterative overlap removal")
-
+        # ── Build polygons ───────────────────────────────────────────────────
         current_cells = []
-        for inst_id, inst_data in surviving_cells:
+        for inst_id, inst_data in inst_info.items():
             contour = np.array(inst_data['contour'])
             try:
                 poly = Polygon(contour)
@@ -901,65 +872,80 @@ class WSIPredictor:
                     poly = poly.buffer(0)
                 if isinstance(poly, MultiPolygon):
                     poly = max(poly.geoms, key=lambda p: p.area)
-                if not poly.is_empty:
+                if not poly.is_empty and poly.area > 0:
                     current_cells.append({
                         'inst_id':   inst_id,
                         'inst_data': inst_data,
                         'poly':      poly,
-                        'area':      poly.area,
+                        'area':      float(poly.area),
                     })
             except Exception:
                 pass
 
-        max_iterations   = 10
-        overlap_threshold = 0.01
+        if len(current_cells) == 0:
+            return {}
+
+        # ── Iterative overlap removal ─────────────────────────────────────────
+        # Use IOU-based dedupe (more stable than raw intersection ratios).
+        max_iterations = 5  # usually enough once you do core filtering
+        iou_thr = float(iou_threshold) if iou_threshold is not None else 0.5
 
         for iteration in range(max_iterations):
-            if len(current_cells) == 0:
+            if len(current_cells) <= 1:
                 break
 
             geometries = [c['poly'] for c in current_cells]
             tree = strtree.STRtree(geometries)
 
             to_keep = []
-            processed_indices = set()
+            processed = set()
             overlaps_found = 0
 
             for i, cell in enumerate(current_cells):
-                if i in processed_indices:
+                if i in processed:
                     continue
 
-                candidates_idx = tree.query(cell['poly'])
-                cluster = []
+                # candidates includes itself; filter clusters by IoU
+                cand_idx_list = tree.query(cell['poly'])
+                cluster = [(i, cell)]  # always include itself
 
-                for cand_idx in candidates_idx:
-                    if cand_idx in processed_indices:
+                for j in cand_idx_list:
+                    if j == i or j in processed:
                         continue
-                    candidate = current_cells[cand_idx]
-                    inter_area = cell['poly'].intersection(candidate['poly']).area
-                    if inter_area == 0:
-                        continue
-                    ratio_a = inter_area / cell['area']
-                    ratio_b = inter_area / candidate['area']
-                    if ratio_a > overlap_threshold or ratio_b > overlap_threshold or i == cand_idx:
-                        cluster.append((cand_idx, candidate))
+                    other = current_cells[j]
 
-                if len(cluster) <= 1:
+                    inter = cell['poly'].intersection(other['poly']).area
+                    if inter <= 0:
+                        continue
+
+                    union = cell['area'] + other['area'] - inter
+                    if union <= 0:
+                        continue
+
+                    iou = inter / union
+                    if iou >= iou_thr:
+                        cluster.append((j, other))
+
+                if len(cluster) == 1:
                     to_keep.append(cell)
-                    processed_indices.add(i)
+                    processed.add(i)
                 else:
                     overlaps_found += 1
+                    # keep the largest polygon (most complete) in this overlap cluster
                     cluster.sort(key=lambda x: x[1]['area'], reverse=True)
                     to_keep.append(cluster[0][1])
                     for idx, _ in cluster:
-                        processed_indices.add(idx)
+                        processed.add(idx)
 
-            self.logger.info(f"      Iteration {iteration+1}: {overlaps_found} overlaps, kept {len(to_keep)}/{len(current_cells)}")
+            self.logger.info(
+                f"      Iteration {iteration+1}: {overlaps_found} overlap clusters, "
+                f"kept {len(to_keep)}/{len(current_cells)}"
+            )
 
-            if overlaps_found == 0:
-                self.logger.info(f"      ✓ Converged!")
-                break
             current_cells = to_keep
+            if overlaps_found == 0:
+                self.logger.info("      ✓ Converged!")
+                break
 
         inst_info_cleaned = {c['inst_id']: c['inst_data'] for c in current_cells}
         self.logger.info(f"   ✅ Final count: {len(inst_info_cleaned)} instances")

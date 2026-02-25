@@ -87,6 +87,14 @@ class CRCZarrDataset(Dataset):
                 return self.zarr_bases['cpm17']
             elif sample_name.startswith('CRC'):
                 return self.zarr_bases['crc']
+            elif sample_name.startswith('cpm15'):
+                return self.zarr_bases['cpm15']
+            elif sample_name.startswith('he_dsb2018'):
+                return self.zarr_bases['he_dsb2018']
+            elif sample_name.startswith('fluorescence_dsb2018'):
+                return self.zarr_bases['fluorescence_dsb2018']
+            elif sample_name.startswith('panoptils'):
+                return self.zarr_bases['panoptils']
             
             # --- Legacy checks (keep just in case, but prioritize above) ---
             elif sample_name in ['train', 'val', 'test']: 
@@ -125,6 +133,14 @@ class CRCZarrDataset(Dataset):
                 return 'cpm17'
             elif sample_name.startswith('CRC'):
                 return 'crc'
+            elif sample_name.startswith('cpm15'):
+                return 'cpm15'
+            elif sample_name.startswith('he_dsb2018'):
+                return 'he_dsb2018'
+            elif sample_name.startswith('fluorescence_dsb2018'):
+                return 'fluorescence_dsb2018'
+            elif sample_name.startswith('panoptils'):
+                return 'panoptils'
             return 'xenium'
     
     def _build_patch_index(self):
@@ -139,7 +155,7 @@ class CRCZarrDataset(Dataset):
             # ========================================================================
             # DATASETS WITH SUBDIRECTORIES: TissueNet, PanNuke, MoNuSeg, TNBC, MoNuSAC
             # ========================================================================
-            if dataset_type in ['tissuenet', 'pannuke', 'monuseg', 'tnbc', 'monusac']:
+            if dataset_type in ['tissuenet', 'pannuke', 'monuseg', 'tnbc', 'monusac', 'cpm15', 'he_dsb2018','fluorescence_dsb2018', 'panoptils']:
                 split_path = os.path.join(zarr_path, sample)
                 
                 if not os.path.exists(split_path):
@@ -161,7 +177,7 @@ class CRCZarrDataset(Dataset):
 
                     total_patches = 0
                     for sub in sub_samples:
-                        if dataset_type in ['monuseg', 'tnbc', 'monusac']:
+                        if dataset_type in ['monuseg', 'tnbc', 'monusac', 'cpm15', 'he_dsb2018','fluorescence_dsb2018', 'panoptils']:
                             zarr_file = os.path.join(split_path, sub, 'images.zarr')
                             mask_file = os.path.join(split_path, sub, 'nuclei_masks.zarr')
                             
@@ -252,6 +268,28 @@ class CRCZarrDataset(Dataset):
                 he_img = np.zeros((h, w, 3), dtype=np.uint8)
                 he_nuclei_mask = np.zeros((h, w), dtype=np.int32)
                 he_cell_mask = np.zeros((h, w), dtype=np.int32)
+            
+            elif dataset_type == 'fluorescence_dsb2018':
+                base_folder = os.path.join(zarr_path, sample_name, sub_sample)
+                
+                # 1. Load raw data
+                raw_img = zarr.open(os.path.join(base_folder, 'images.zarr'), 'r')[patch_idx] # (512, 512, 3)
+                mif_nuclei_mask = zarr.open(os.path.join(base_folder, 'nuclei_masks.zarr'), 'r')[patch_idx]
+                
+                # 2. Extract channels
+                # Based on your previous test, Ch 0 is nuclei. 
+                # Since Zarr has 3 channels, let's take the first two for MIF compatibility.
+                mif_img = raw_img[..., :2].astype(np.float32) 
+                
+                # 3. FIX NORMALIZATION: Force division by 255 because data is uint8
+                mif_img /= 255.0 
+                
+                h, w = mif_img.shape[:2]
+                # Placeholders
+                he_img = np.zeros((h, w, 3), dtype=np.float32)
+                he_nuclei_mask = np.zeros((h, w), dtype=np.int32)
+                he_cell_mask = np.zeros((h, w), dtype=np.int32)
+                mif_cell_mask = np.zeros((h, w), dtype=np.int32)
 
             elif dataset_type == 'pannuke':
                 base_folder = os.path.join(zarr_path, sample_name, sub_sample)
@@ -277,7 +315,7 @@ class CRCZarrDataset(Dataset):
                 mif_img = np.zeros((h, w, 2), dtype=np.uint16)
                 mif_nuclei_mask = np.zeros((h, w), dtype=np.int32)
                 mif_cell_mask = np.zeros((h, w), dtype=np.int32)
-            elif dataset_type == 'monusac':
+            elif dataset_type in ['monusac', 'cpm15', 'he_dsb2018', 'panoptils']:
                 base_folder = os.path.join(zarr_path, sample_name, sub_sample)
                 
                 he_img = zarr.open(os.path.join(base_folder, 'images.zarr'), 'r')[patch_idx]
@@ -625,16 +663,21 @@ def create_dataloaders(config) -> Tuple[DataLoader, DataLoader, DataLoader]:
             consep = sum(1 for s in samples if s.startswith('consep'))
             kumar = sum(1 for s in samples if s.startswith('kumar'))
             cpm17 = sum(1 for s in samples if s.startswith('cpm17'))
-            
+            cpm15 = sum(1 for s in samples if s.startswith('cpm15'))
+            he_dsb = sum(1 for s in samples if s.startswith('he_dsb2018'))
+            fluorescence_dsb = sum(1 for s in samples if s.startswith('fluorescence_dsb2018'))
+            ptils = sum(1 for s in samples if s.startswith('panoptils'))
             # Xenium is whatever is left
-            xen = len(samples) - (crc + tn + pn + liz + mon + sac + tnbc + nuins + cryo + bc + consep + kumar + cpm17)
+            xen = len(samples) - (crc + tn + pn + liz + mon + sac + tnbc + nuins + cryo + bc + consep + kumar + cpm17 + cpm15 + he_dsb + fluorescence_dsb + ptils)
             
-            return crc, xen, tn, pn, liz, mon, sac, tnbc, nuins, cryo, bc, consep, kumar, cpm17
+            return crc, xen, tn, pn, liz, mon, sac, tnbc, nuins, cryo, bc, consep, kumar, cpm17, cpm15, he_dsb, fluorescence_dsb, ptils
         # Helper for printing
+        # Change this line (approx line 654):
         def print_split(name, counts):
-            (c, x, t, p, l, m, s, tnbc, n, cryo, bc, cp, kum, cpm) = counts
-            print(f"{name} split: {c} CRC + {x} Xenium + {t} TissueNet + {p} PanNuke + {l} Lizard + {m} MoNuSeg + {s} MoNuSAC + {tnbc} TNBC + {n} NuInsSeg + {cryo} CryoNuSeg + {bc} BC + {cp} CoNSeP + {kum} Kumar + {cpm} CPM17")
-
+            # Added 'f_dsb' to make it 18 variables
+            (c, x, t, p, l, m, s, tnbc, n, cryo, bc, cp, kum, cpm, cpm15, dsb, f_dsb, ptils) = counts 
+            # Update your print string to use f_dsb as well
+            print(f"{name} split: {c} CRC + {x} Xenium + {t} TissueNet + {p} PanNuke + {l} Lizard + {m} MoNuSeg + {s} MoNuSAC + {tnbc} TNBC + {n} NuInsSeg + {cryo} CryoNuSeg + {bc} BC + {cp} CoNSeP + {kum} Kumar + {cpm} CPM17 + {cpm15} CPM15 + {dsb} HE_DSB2018 + {f_dsb} Fluo_DSB2018 + {ptils} PanopTILs")
         print_split("Train", count_types(train_samples))
         print_split("Val  ", count_types(val_samples))
         print_split("Test ", count_types(test_samples))

@@ -396,6 +396,8 @@ class TileProcessor:
     # =========================================================================
     # MODIFIED: process_tile_instances — now supports constrained watershed
     # =========================================================================
+    # MODIFIED: process_tile_instances — now supports constrained watershed
+    # =========================================================================
     def process_tile_instances(
         self, 
         tile_pred, 
@@ -415,8 +417,8 @@ class TileProcessor:
         """Process a single tile to extract instances (CellViT style)
         
         When nuclei_inst_map is provided AND tile_pred contains a cell seg map,
-        the method switches to nuclei-constrained watershed instead of the
-        standard HoVer-Net instance extraction.  The output format is identical
+        the method switches to HV-constrained watershed instead of the
+        standard HoVer-Net instance extraction. The output format is identical
         either way, so nothing downstream changes.
 
         Args:
@@ -443,23 +445,30 @@ class TileProcessor:
         y1, x1, y2, x2 = position
 
         # ─────────────────────────────────────────────────────────────────────
-        # BRANCH A: Nuclei-constrained watershed (cell branches only)
+        # BRANCH A: HV-constrained watershed + Orphan Rescue (cell branches only)
         # Activated when caller passes nuclei_inst_map from the nuclei branch.
         # ─────────────────────────────────────────────────────────────────────
         if nuclei_inst_map is not None:
             from vitaminp.inference.constrained_watershed import (
-                apply_nuclei_constrained_watershed,
+                apply_hv_constrained_watershed,
                 extract_instances_from_labels,
             )
 
             # tile_pred['seg'] is the raw cell probability map (H, W) in [0, 1]
             cell_seg_map = tile_pred['seg']
+            
+            # Extract H and V maps to define the boundaries
+            cell_h_map = tile_pred['hv'][0]
+            cell_v_map = tile_pred['hv'][1]
 
-            # Run constrained watershed: nuclei seeds → cell boundaries
-            constrained_labels = apply_nuclei_constrained_watershed(
+            # Run constrained watershed: nuclei seeds + HV boundaries + orphans
+            constrained_labels = apply_hv_constrained_watershed(
                 nuclei_labels=nuclei_inst_map,
-                cell_seg_map=cell_seg_map,
-                cell_threshold=cell_threshold,
+                cell_prob_map=cell_seg_map,
+                cell_h_map=cell_h_map,
+                cell_v_map=cell_v_map,
+                prob_threshold=cell_threshold,
+                min_orphan_area=30  # Minimum size in pixels for an orphan cell
             )
 
             # Convert min_area_um → pixels (same logic as standard path)
@@ -545,8 +554,48 @@ class TileProcessor:
             }
             cells_global.append(cell_global)
 
-        return cells_global
+        cells_global = self._keep_instances_in_core_global(
+            cells_global,
+            position=position,
+            grid_position=grid_position,   # ✅ IMPORTANT
+            core_margin=self.overlap // 2,
+        )
 
+        return cells_global
+    def _keep_instances_in_core_global(self, cells_global, position, grid_position=None, core_margin=None):
+        """
+        Keep only instances whose GLOBAL centroid is inside the tile's CORE region.
+        BUT: relax the margin on outermost tiles (global slide boundary), so border
+        objects are not lost.
+        """
+        y1, x1, y2, x2 = position
+
+        if core_margin is None:
+            core_margin = self.overlap // 2
+
+        # default margins on all sides
+        left_m = right_m = top_m = bottom_m = core_margin
+
+        # If this tile is on the global outer boundary, don't exclude that side
+        if grid_position is not None:
+            tile_row, tile_col, n_tiles_h, n_tiles_w = grid_position
+            if tile_row == 0:              top_m = 0
+            if tile_row == n_tiles_h - 1:  bottom_m = 0
+            if tile_col == 0:              left_m = 0
+            if tile_col == n_tiles_w - 1:  right_m = 0
+
+        # Core bounds in GLOBAL coords
+        x_min = x1 + left_m
+        x_max = x1 + self.tile_size - right_m
+        y_min = y1 + top_m
+        y_max = y1 + self.tile_size - bottom_m
+
+        kept = []
+        for c in cells_global:
+            cx, cy = c["centroid"]  # [x, y]
+            if (x_min <= cx < x_max) and (y_min <= cy < y_max):
+                kept.append(c)
+        return kept
 
     def _is_edge_cell(self, bbox, patch_size, margin=32):
         """Check if a cell is near the edge of a tile

@@ -64,7 +64,7 @@ spec:
               # CONFIGURATION
               # ============================================================================
               IMAGE_PATH = "/rsrch9/home/plm/idso_fa1_pathology/TIER1/paul-xenium/public_data/10x_genomics/Xenium_V1_Human_Lung_Cancer_FFPE_outs/Xenium_V1_Human_Lung_Cancer_FFPE_he_image_registered.ome.tif"
-              CHECKPOINT_PATH = "checkpoints/vitamin_p_flex_large_fold21_best.pth"
+              CHECKPOINT_PATH = "checkpoints/vitamin_p_flex_large_fold32_hv4_mag_best.pth"
               OUTPUT_DIR = "inference_dsp/xenium_v1_lung_results_he_registered"
 
               print("="*60)

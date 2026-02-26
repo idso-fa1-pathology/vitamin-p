@@ -14,11 +14,16 @@
 
 </div>
 
----
 
+---
 <p align="center">
   <img src="./docs/figures/vitaminp_ncr.png"/>
 </p>
+
+<p align="center">
+  <img src="./docs/figures/vitaminp_overview.png"/>
+</p>
+
 ---
 
 ## Overview

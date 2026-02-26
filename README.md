@@ -24,14 +24,6 @@
 
 **VitaminP** is a DINOv2-based segmentation framework that learns cytoplasmic boundaries from paired H&E–MIF training data, enabling **whole-cell segmentation directly from routine H&E slides** — without requiring immunofluorescence at inference time.
 
-| | VitaminP | Cellpose-SAM | CellViT++ | Hover-Net |
-|---|---|---|---|---|
-| H&E whole-cell segmentation | ✅ | ⚠️ limited | ❌ | ❌ |
-| MIF segmentation | ✅ | ✅ | ❌ | ❌ |
-| Single-pass inference | ✅ | ❌ | ✅ | ✅ |
-| No prompt required | ✅ | ❌ | ✅ | ✅ |
-| WSI throughput (MPx/min) | **1.96×** faster | baseline | — | — |
-
 Trained on **14 public datasets · 34 cancer types · 7M+ annotated instances**.
 
 ---

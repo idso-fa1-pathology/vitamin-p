@@ -16,7 +16,7 @@
 
 ---
 
-![VitaminP Overview](https://raw.githubusercontent.com/idso-fa1-pathology/vitamin-p/main/docs/figures/vitaminp_ncr.png)
+![VitaminP Overview](https://raw.githubusercontent.com/idso-fa1-pathology/vitamin-p/main/docs/figures/vitaminp_ncr.tif)
 ---
 
 ## Overview

@@ -17,6 +17,7 @@
 ---
 
 ![VitaminP Overview](docs/figures/vitaminp_ncr.png)
+
 ---
 
 ## Overview

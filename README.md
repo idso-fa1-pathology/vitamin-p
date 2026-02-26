@@ -17,7 +17,7 @@
 ---
 
 <p align="center">
-  <img src="./docs/figures/vitaminp_ncr.png"/>
+  <img src="./docs/figures/vitaminp_ncr.tif"/>
 </p>
 ---
 

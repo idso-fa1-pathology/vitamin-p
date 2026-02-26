@@ -18,7 +18,7 @@
 
 <!-- FIGURE PLACEHOLDER -->
 <!-- Replace the line below with your actual figure:
-     ![VitaminP Overview](docs/figures/vitaminp_overview.png)
+     ![VitaminP Overview](docs/figures/vitaminp_ncr.png)
      Recommended: side-by-side panel showing H&E input | nuclei output | cell output
      for both H&E-only (flex) and H&E+MIF (dual) modes. ~1200px wide, 300dpi. -->
 

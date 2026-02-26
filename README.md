@@ -16,15 +16,7 @@
 
 ---
 
-<!-- FIGURE PLACEHOLDER -->
-<!-- Replace the line below with your actual figure:
-     ![VitaminP Overview](docs/figures/vitaminp_ncr.png)
-     Recommended: side-by-side panel showing H&E input | nuclei output | cell output
-     for both H&E-only (flex) and H&E+MIF (dual) modes. ~1200px wide, 300dpi. -->
-
-> **📸 Figure placeholder** — add your overview figure here showing H&E → segmentation results.
-> Suggested panel: raw H&E tile | predicted nuclei | predicted cells | overlay on a representative cancer image.
-
+![VitaminP Overview](docs/figures/vitaminp_ncr.png)
 ---
 
 ## Overview

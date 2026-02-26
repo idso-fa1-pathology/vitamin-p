@@ -54,7 +54,7 @@ docker pull ghcr.io/idso-fa1-pathology/vitaminp:latest
 
 | Model | Input | Use case | Size |
 |-------|-------|----------|------|
-| `flex` | H&E **or** MIF | General purpose — start here | large |
+| `flex` | H&E **or** MIF **or** IHC | General purpose — start here | large |
 | `dual` | H&E **+** MIF (paired) | Maximum accuracy with both modalities | base |
 | `syn` | H&E only | Whole-cell when no MIF available | base |
 

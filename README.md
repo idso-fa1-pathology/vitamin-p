@@ -343,7 +343,7 @@ If you use VitaminP in your research, please cite:
              network for pathology cell segmentation},
   author  = {Shokrollahi, Yasin and Pinao Gonzales, Karina and Barrientos Toro, Elizve
              and Acosta, Paul and Chen, Pingjun and Yuan, Yinyin and Pan, Xiaoxi},
-  journal = {Nature Methods},
+  journal = {},
   year    = {2025}
 }
 ```

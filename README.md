@@ -71,7 +71,7 @@ docker pull ghcr.io/idso-fa1-pathology/vitaminp:latest
 
 ---
 
-## Quick Start
+## Quick Starts
 
 ```python
 import vitaminp

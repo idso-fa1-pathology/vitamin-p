@@ -1,4 +1,4 @@
-# <span style="color:red">V</span>i<span style="color:red">t</span>am<span style="color:red">i</span>n-<span style="color:red">P</span>: a vision transformer-assisted multimodal integration network for pathology cell segmentation
+# VitaminP: a vision transformer-assisted multimodal integration network for pathology cell segmentation
 
 <div align="center">
 

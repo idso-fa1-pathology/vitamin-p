@@ -70,6 +70,24 @@ docker pull ghcr.io/idso-fa1-pathology/vitaminp:latest
 > 💡 **Tip:** Running `he_nuclei` + `he_cell` together activates joint inference — nuclei predictions constrain cell boundaries for better accuracy.
 
 ---
+## 🖥 VitaminPScope UI (Slide Viewer)
+
+For interactive visualization of VitaminP segmentation results and whole-slide images, use **VitaminPScope**, a lightweight web-based digital pathology platform.
+
+➡️ https://github.com/idso-fa1-pathology/VitaminPScope
+
+Features:
+
+- Whole-slide image browsing
+- Multi-channel microscopy viewer
+- Side-by-side slide comparison
+- Visualization of VitaminP GeoJSON outputs
+- Slide management workspace
+
+VitaminPScope is built with **React, FastAPI, OpenSeadragon, and Viv**, and runs easily with **Docker Compose**.
+
+See the repository for installation and usage instructions.
+
 
 ## Quick Starts
 
@@ -318,23 +336,6 @@ results/
 GeoJSON output loads directly into [QuPath](https://qupath.github.io/) for interactive review.
 
 ---
-## 🖥 VitaminPScope UI (Slide Viewer)
-
-For interactive visualization of VitaminP segmentation results and whole-slide images, use **VitaminPScope**, a lightweight web-based digital pathology platform.
-
-➡️ https://github.com/idso-fa1-pathology/VitaminPScope
-
-Features:
-
-- Whole-slide image browsing
-- Multi-channel microscopy viewer
-- Side-by-side slide comparison
-- Visualization of VitaminP GeoJSON outputs
-- Slide management workspace
-
-VitaminPScope is built with **React, FastAPI, OpenSeadragon, and Viv**, and runs easily with **Docker Compose**.
-
-See the repository for installation and usage instructions.
 
 ## Troubleshooting
 

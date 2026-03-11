@@ -1,4 +1,4 @@
-# VitaminP: a vision transformer-assisted multimodal integration network for pathology cell segmentation
+# VitaminP: a vision transformer-assisted multimodal integration network for pathology cell segmentation.
 
 <div align="center">
 

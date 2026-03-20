@@ -17,7 +17,7 @@ from pathlib import Path
 # ── Registry ──────────────────────────────────────────────────────────────────
 # Maps model name → (HuggingFace filename, model class name, model size)
 
-HF_REPO = "yasinmdanderson/vitaminp-weights"
+HF_REPO = "idso-fa1-pathology/VitaminP"
 
 MODEL_REGISTRY = {
     "dual": {

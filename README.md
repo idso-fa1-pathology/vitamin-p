@@ -374,8 +374,10 @@ MIT License — see [LICENSE](LICENSE).
 
 ---
 
-<!-- <div align="center">
-  <!-- <img src="./docs/figures/mdanderson_logo.png" alt="MD Anderson Logo" width="200"/> -->
+<!-- 
+<div align="center">
+  <img src="./docs/figures/mdanderson_logo.png" alt="MD Anderson Logo" width="200"/>
   <br>
   Department of Translational Molecular Pathology · Institute for Data Science in Oncology
-</div> -->
+</div> 
+-->

@@ -355,6 +355,8 @@ GeoJSON output loads directly into [QuPath](https://qupath.github.io/) for inter
 
 If you use VitaminP in your research, please cite:
 
+📄 Paper: https://arxiv.org/abs/2604.23799
+
 ```bibtex
 @article{shokrollahi2026vitaminp,
   title   = {VitaminP: cross-modal learning enables whole-cell segmentation from routine histology},

@@ -75,13 +75,13 @@ EXTRAS_REQUIRE = {
 
 setup(
     name="vitaminp",
-    version="0.2.0",
-    author="Yousef Shokrollahi",
-    author_email="your@email.com",          # <-- update this
+    version="0.2.1",
+    author="Yasin Shokrollahi",
+    author_email="YShokrollahi@mdanderson.org",          # <-- update this
     description="Cell and nucleus segmentation for whole slide images (H&E and MIF)",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/vitaminp",  # <-- update this
+    url="https://github.com/idso-fa1-pathology/VitaminP",  # <-- update this
     packages=find_packages(),
     include_package_data=True,
     install_requires=INSTALL_REQUIRES,

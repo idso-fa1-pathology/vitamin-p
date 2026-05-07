@@ -115,9 +115,12 @@ class TileProcessor:
             tile_mask_dilated = cv2.dilate(tile_mask_2d, kernel, iterations=1)
             tile_mask = tile_mask_dilated.flatten().tolist()
             
-            n_original = sum(np.array(tile_mask_2d).flatten())
-            n_dilated = sum(tile_mask)
-            print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
+            n_original = int(np.count_nonzero(tile_mask_2d))
+            n_dilated = int(np.count_nonzero(tile_mask_dilated))
+            print(
+                f"   Tissue dilation: {n_original} → {n_dilated} tiles "
+                f"(+{n_dilated - n_original} boundary tiles)"
+            )
         
         return positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
 
@@ -322,9 +325,12 @@ class TileProcessor:
             tiles = tiles_updated
             tile_mask = tile_mask_new
             
-            n_original = sum(np.array(tile_mask_2d).flatten())
-            n_dilated = sum(tile_mask)
-            print(f"   Tissue dilation: {n_original} → {n_dilated} tiles (+{n_dilated - n_original} boundary tiles)")
+            n_original = int(np.count_nonzero(tile_mask_2d))
+            n_dilated = int(np.count_nonzero(tile_mask_dilated))
+            print(
+                f"   Tissue dilation: {n_original} → {n_dilated} tiles "
+                f"(+{n_dilated - n_original} boundary tiles)"
+            )
                 
         return tiles, positions, (n_tiles_h, n_tiles_w), (tile_mask if filter_tissue else None)
 
